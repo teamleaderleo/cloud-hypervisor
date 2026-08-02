@@ -1,0 +1,98 @@
+From: Linux Fieldwork <noreply@example.invalid>
+Subject: [PATCH] tests: use shutdown events for API lifecycle gates
+
+The API shutdown and delete tests currently halt the guest and then treat an
+unresponsive SSH service as proof that guest shutdown has completed. SSH can
+disappear while other guest shutdown work is still running.
+
+Start these VMMs with `--no-shutdown` and an event monitor. Power the guest
+off normally, wait for the exact `shutdown` event, and only then exercise the
+next API lifecycle transition. This preserves the VMM process while replacing
+a service-level proxy with the VMM-owned state transition.
+
+Addresses cloud-hypervisor#8046.
+---
+ cloud-hypervisor/tests/common/tests_wrappers.rs | 50 ++++++++++++++------------
+ 1 file changed, 27 insertions(+), 23 deletions(-)
+
+diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/tests/common/tests_wrappers.rs
+index 046406d0..00000000 100644
+--- a/cloud-hypervisor/tests/common/tests_wrappers.rs
++++ b/cloud-hypervisor/tests/common/tests_wrappers.rs
+@@ -62,9 +62,12 @@ pub(crate) fn _test_api_create_boot(target_api: &TargetApi, guest: &Guest) {
+ // From the API: Create a VM, boot it and check it can be shutdown and then
+ // booted again
+ pub(crate) fn _test_api_shutdown(target_api: &TargetApi, guest: &Guest) {
++    let event_path = temp_event_monitor_path(&guest.tmp_dir);
+     let mut child = GuestCommand::new(guest)
+         .args(target_api.guest_args())
++        .args(["--no-shutdown"])
++        .args(["--event-monitor", format!("path={event_path}").as_str()])
+         .capture_output()
+         .spawn()
+         .unwrap();
+@@ -92,16 +95,15 @@ pub(crate) fn _test_api_shutdown(target_api: &TargetApi, guest: &Guest) {
+         guest.validate_cpu_count(None);
+         guest.validate_memory(None);
+ 
+-        // Sync and shutdown without powering off to prevent filesystem
+-        // corruption.
+-        guest.ssh_command("sync").unwrap();
+-        guest.ssh_command("sudo shutdown -H now").unwrap();
+-
+-        // Wait for the guest to be fully shutdown
+-        assert!(guest.wait_for_ssh_unresponsive(Duration::from_secs(20)));
+-
+-        // Then shut it down
+-        assert!(target_api.remote_command("shutdown", None));
++        guest.ssh_command("sudo poweroff").unwrap();
++        let latest_events = [&MetaEvent {
++            event: "shutdown".to_string(),
++            device_id: None,
++        }];
++        assert!(wait_for_latest_events_exact(
++            Duration::from_secs(20),
++            &latest_events,
++            &event_path,
++        ));
+ 
+         // Then boot it again
+         assert!(target_api.remote_command("boot", None));
+@@ -123,9 +125,12 @@ pub(crate) fn _test_api_shutdown(target_api: &TargetApi, guest: &Guest) {
+ // From the API: Create a VM, boot it and check it can be deleted and then recreated
+ // booted again.
+ pub(crate) fn _test_api_delete(target_api: &TargetApi, guest: &Guest) {
++    let event_path = temp_event_monitor_path(&guest.tmp_dir);
+     let mut child = GuestCommand::new(guest)
+         .args(target_api.guest_args())
++        .args(["--no-shutdown"])
++        .args(["--event-monitor", format!("path={event_path}").as_str()])
+         .capture_output()
+         .spawn()
+         .unwrap();
+@@ -153,14 +158,13 @@ pub(crate) fn _test_api_delete(target_api: &TargetApi, guest: &Guest) {
+         guest.validate_cpu_count(None);
+         guest.validate_memory(None);
+ 
+-        // Sync and shutdown without powering off to prevent filesystem
+-        // corruption.
+-        guest.ssh_command("sync").unwrap();
+-        guest.ssh_command("sudo shutdown -H now").unwrap();
+-
+-        // Wait for the guest to be fully shutdown
+-        assert!(guest.wait_for_ssh_unresponsive(Duration::from_secs(20)));
++        guest.ssh_command("sudo poweroff").unwrap();
++        let latest_events = [&MetaEvent {
++            event: "shutdown".to_string(),
++            device_id: None,
++        }];
++        assert!(wait_for_latest_events_exact(
++            Duration::from_secs(20),
++            &latest_events,
++            &event_path,
++        ));
+ 
+         // Then delete it
+         assert!(target_api.remote_command("delete", None));
+-- 
+2.47.0
