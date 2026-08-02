@@ -12,14 +12,14 @@ a service-level proxy with the VMM-owned state transition.
 
 Addresses cloud-hypervisor#8046.
 ---
- cloud-hypervisor/tests/common/tests_wrappers.rs | 50 ++++++++++++++------------
- 1 file changed, 27 insertions(+), 23 deletions(-)
+ cloud-hypervisor/tests/common/tests_wrappers.rs | 43 ++++++++++++++---------
+ 1 file changed, 26 insertions(+), 17 deletions(-)
 
 diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/tests/common/tests_wrappers.rs
 index 046406d0..00000000 100644
 --- a/cloud-hypervisor/tests/common/tests_wrappers.rs
 +++ b/cloud-hypervisor/tests/common/tests_wrappers.rs
-@@ -62,9 +62,12 @@ pub(crate) fn _test_api_create_boot(target_api: &TargetApi, guest: &Guest) {
+@@ -1,8 +1,11 @@
  // From the API: Create a VM, boot it and check it can be shutdown and then
  // booted again
  pub(crate) fn _test_api_shutdown(target_api: &TargetApi, guest: &Guest) {
@@ -31,7 +31,7 @@ index 046406d0..00000000 100644
          .capture_output()
          .spawn()
          .unwrap();
-@@ -92,16 +95,15 @@ pub(crate) fn _test_api_shutdown(target_api: &TargetApi, guest: &Guest) {
+@@ -30,16 +33,16 @@
          guest.validate_cpu_count(None);
          guest.validate_memory(None);
  
@@ -58,7 +58,7 @@ index 046406d0..00000000 100644
  
          // Then boot it again
          assert!(target_api.remote_command("boot", None));
-@@ -123,9 +125,12 @@ pub(crate) fn _test_api_shutdown(target_api: &TargetApi, guest: &Guest) {
+@@ -61,8 +64,11 @@
  // From the API: Create a VM, boot it and check it can be deleted and then recreated
  // booted again.
  pub(crate) fn _test_api_delete(target_api: &TargetApi, guest: &Guest) {
@@ -70,7 +70,7 @@ index 046406d0..00000000 100644
          .capture_output()
          .spawn()
          .unwrap();
-@@ -153,14 +158,13 @@ pub(crate) fn _test_api_delete(target_api: &TargetApi, guest: &Guest) {
+@@ -90,13 +96,16 @@
          guest.validate_cpu_count(None);
          guest.validate_memory(None);
  
