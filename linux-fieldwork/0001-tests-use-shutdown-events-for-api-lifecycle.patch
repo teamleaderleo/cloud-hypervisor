@@ -12,8 +12,8 @@ a service-level proxy with the VMM-owned state transition.
 
 Addresses cloud-hypervisor#8046.
 ---
- cloud-hypervisor/tests/common/tests_wrappers.rs | 43 ++++++++++++++---------
- 1 file changed, 26 insertions(+), 17 deletions(-)
+ cloud-hypervisor/tests/common/tests_wrappers.rs | 46 ++++++++++++++++++++++++++--------------------
+ 1 file changed, 26 insertions(+), 20 deletions(-)
 
 diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/tests/common/tests_wrappers.rs
 index 046406d0..00000000 100644
@@ -70,7 +70,7 @@ index 046406d0..00000000 100644
          .capture_output()
          .spawn()
          .unwrap();
-@@ -90,13 +96,16 @@
+@@ -90,14 +96,16 @@
          guest.validate_cpu_count(None);
          guest.validate_memory(None);
  
