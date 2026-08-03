@@ -1,80 +1,91 @@
 # Linux Fieldwork handoff — API lifecycle shutdown events
 
-Updated: 2026-08-02
-State: PATCH READY, RUNTIME GATE PENDING
+Updated: 2026-08-03
+State: COMPILE-READY, KVM RUNTIME GATE PENDING
 Branch: `linux-fieldwork/api-shutdown-events`
-Base: fork `main` at `dcea656a722cab1b24c1d7c48fa2b12a7276f04c`
+Current branch head: `e23378cfd564abc1ebf67a92107126582a9e45c3`
+Fork base: `main` at `dcea656a722cab1b24c1d7c48fa2b12a7276f04c`
+Internal review carrier: `teamleaderleo/cloud-hypervisor#1`
 Upstream issue: `cloud-hypervisor/cloud-hypervisor#8046`
 
 ## Finding
 
-The shared HTTP/D-Bus API wrapper tests `_test_api_shutdown` and `_test_api_delete` currently run `shutdown -H`, wait until SSH becomes unresponsive, and then perform the next API lifecycle operation.
+The shared HTTP/D-Bus API wrapper tests `_test_api_shutdown` and `_test_api_delete` currently run `shutdown -H`, wait until SSH becomes unresponsive, and then perform the next lifecycle operation.
 
-The originating review correctly identified that loss of SSH only proves that sshd stopped. Other guest shutdown work can still be running. The tests therefore use a service-level symptom as a proxy for a VM lifecycle transition.
+Loss of SSH proves that sshd stopped, not that guest shutdown reached the VMM-owned terminal state. These tests reuse the VMM and disk immediately, so a service-level proxy can allow a premature boot or delete/recreate transition.
 
-Merged PR #8025 added `--no-shutdown`. With that flag, guest ACPI poweroff calls `vm_shutdown()` and emits the VMM `shutdown` event while keeping the VMM process alive. This is the exact mechanism required by issue #8046.
+Merged `--no-shutdown` support supplies the stronger mechanism requested by issue #8046: normal guest poweroff invokes `vm_shutdown()`, emits the VMM `shutdown` event, and leaves the VMM process alive.
 
 ## Candidate contract
 
-For API shutdown/delete lifecycle tests:
+For both API shutdown/delete wrappers:
 
 1. start the VMM with `--no-shutdown` and an event monitor;
-2. boot and validate the guest;
+2. create, boot, and validate the guest;
 3. request normal guest `poweroff`;
 4. wait for an exact latest `shutdown` event;
-5. only then boot again or delete/recreate through the selected API.
+5. only then boot again or delete/recreate through the selected API;
+6. retain the existing second-boot validation.
 
-Because `_test_api_shutdown` and `_test_api_delete` accept `TargetApi`, one source change covers the HTTP and D-Bus test variants.
+Because the wrappers accept `TargetApi`, the same source correction covers HTTP and D-Bus variants.
 
 ## Branch contents
 
-- `linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch`
-  - adds an event monitor and `--no-shutdown` to both wrappers;
-  - replaces `shutdown -H` plus `wait_for_ssh_unresponsive()` with guest `poweroff` plus `wait_for_latest_events_exact()`;
-  - leaves the subsequent boot or delete/create/boot assertions intact.
+- `linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch` — exact current-source patch;
+- `.github/workflows/linux-fieldwork-api-shutdown.yml` — focused patch, contract, formatting, and compile gate;
+- this handoff.
 
-Source identities used:
+Source identities:
 
 - `cloud-hypervisor/tests/common/tests_wrappers.rs`: blob `046406d0b1371b0a28f13ba8242e34978def5f89`;
-- event helper implementation observed in `cloud-hypervisor/tests/common/utils.rs`;
-- `--no-shutdown` implementation and semantics confirmed through merged PR #8025 and current CLI source.
+- event helpers observed in current `cloud-hypervisor/tests/common/utils.rs`;
+- `--no-shutdown` behavior confirmed in current source and merged PR #8025.
 
-## Evidence
+## Executed exact-source gate
 
-- Issue #8046 is open, unassigned, and has no comments.
-- The originating review states that `shutdown -H` does not generate an event and that normal poweroff would ordinarily exit the VMM.
-- PR #8025 documents that `--no-shutdown` converts guest-triggered poweroff into `vm_shutdown()` while retaining the VMM process.
-- `wait_for_latest_events_exact(timeout, events, event_file)` already exists and is used by current integration tests.
-- The retained patch passes `patch --dry-run -p1` against a fixture containing the exact current wrapper bodies.
-- Search for pull requests matching issue 8046 and this change returned none.
+Focused workflow:
 
-## Tests not run
+- run: `30837304076`;
+- job: `91765518101`;
+- exact branch head: `e23378cfd564abc1ebf67a92107126582a9e45c3`;
+- result: success.
 
-The integration tests require the Cloud Hypervisor workload images, KVM/hypervisor access, and the project test harness. Those resources were not present in this execution environment.
+Passed steps:
 
-The source patch has not been applied to the large tracked Rust file through the connector; it is retained as an apply-ready artifact. This distinction matters: branch code remains current upstream code until the patch is applied in a normal checkout.
+- apply the retained patch to the exact current wrapper source;
+- verify two `--no-shutdown` uses and two event-monitor arguments;
+- verify normal guest `poweroff` and exact shutdown-event waits;
+- verify the target wrapper slice no longer uses SSH-unresponsive polling;
+- `cargo fmt --all -- --check`;
+- `cargo check -p cloud-hypervisor --tests --features dbus_api`, compiling the shared HTTP and D-Bus integration-test surface.
 
-## Next technical step
+## Review-found carrier defects
 
-Apply the retained patch in a full checkout, then run the narrow HTTP and D-Bus integration selectors that invoke `_test_api_shutdown` and `_test_api_delete`. At minimum, verify:
+Earlier focused attempts failed before product compilation and found two patch-packaging defects:
 
-- `shutdown` event arrives within 20 seconds;
-- VMM process remains alive after guest poweroff;
+1. a final hunk count/location derived from a reduced fixture rather than the real full-file source;
+2. an `index ...00000000` line that falsely declared the modified source file as deleted.
+
+Both are corrected. The successful run above proves the current carrier applies to the exact source and compiles.
+
+## First incomplete step
+
+Run the narrow HTTP and D-Bus integration selectors with KVM and the project workload images. Required observations:
+
+- the VMM remains alive after guest poweroff under `--no-shutdown`;
+- the shutdown event arrives within the existing 20-second budget;
 - boot-after-shutdown succeeds;
 - delete/create/boot succeeds;
-- event file from the first VM state does not cause a false positive after recreation;
-- both HTTP and D-Bus variants pass.
+- the event file cannot produce a stale false positive;
+- cloud-init and OS disk state survive immediate rerun;
+- HTTP and D-Bus variants both pass.
 
-Run formatting before retaining the source commit:
+Do not claim runtime correctness from compilation alone.
 
-```text
-cargo fmt --all -- --check
-```
+## Risk boundary
 
-## Risk to check
-
-`wait_for_latest_events_exact()` matches the most recent events. The delete/recreate flow should ensure the first shutdown event cannot satisfy a later lifecycle assertion accidentally. The current candidate has only one shutdown assertion before deletion, so no event-file reset is expected, but the live run must confirm the event order.
+`wait_for_latest_events_exact()` matches the most recent event suffix. The current candidate makes one shutdown assertion before each next transition, so no event reset appears necessary, but live execution must verify that the event is emitted only after sufficient VM/device shutdown for disk reuse.
 
 ## External-contact state
 
-`false; none occurred`. No upstream issue, pull request, comment, review, discussion, or email was created.
+`false; none occurred`. No canonical upstream issue comment, pull request, review, reaction, email, or other interaction was created.
