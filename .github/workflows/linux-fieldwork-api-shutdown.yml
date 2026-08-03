@@ -41,4 +41,15 @@ jobs:
         run: |
           cargo test -p cloud-hypervisor --test integration --features dbus_api -- --list \
             | tee /tmp/integration-tests.txt
-          grep -E 'api_(shutdown|delete)' /tmp/integration-tests.txt
+          grep -E 'test_api_(http|dbus)_(shutdown|delete)' /tmp/integration-tests.txt \
+            | tee /tmp/lifecycle-tests.txt
+          test "$(wc -l < /tmp/lifecycle-tests.txt)" -eq 4
+      - name: Probe hosted KVM prerequisite
+        run: |
+          ls -l /dev/kvm 2>/dev/null || true
+          if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo 'KVM_PREREQUISITE=available'
+          else
+            echo 'KVM_PREREQUISITE=unavailable'
+            echo 'The project workload/KVM lifecycle matrix remains a neutral environment skip on this runner.'
+          fi
