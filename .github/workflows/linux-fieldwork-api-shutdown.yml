@@ -1,0 +1,34 @@
+name: Linux Fieldwork API shutdown events
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/api-shutdown-events
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply retained source patch
+        run: patch --fuzz=0 --no-backup-if-mismatch -p1 < linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch
+      - name: Verify candidate contract
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('cloud-hypervisor/tests/common/tests_wrappers.rs').read_text()
+          assert p.count('.args(["--no-shutdown"])') == 2
+          assert p.count('sudo poweroff') >= 2
+          assert p.count('wait_for_latest_events_exact(') >= 2
+          assert 'wait_for_ssh_unresponsive(Duration::from_secs(20))' not in p[p.index('pub(crate) fn _test_api_shutdown'):p.index('pub(crate) fn _test_api_pause_resume')]
+          print('candidate-contract-ok')
+          PY
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Compile HTTP and D-Bus integration tests
+        run: cargo check -p cloud-hypervisor --tests --features dbus_api
