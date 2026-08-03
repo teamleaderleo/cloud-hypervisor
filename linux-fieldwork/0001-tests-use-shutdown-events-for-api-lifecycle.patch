@@ -16,7 +16,6 @@ Addresses cloud-hypervisor#8046.
  1 file changed, 26 insertions(+), 20 deletions(-)
 
 diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/tests/common/tests_wrappers.rs
-index 046406d0..00000000 100644
 --- a/cloud-hypervisor/tests/common/tests_wrappers.rs
 +++ b/cloud-hypervisor/tests/common/tests_wrappers.rs
 @@ -64,8 +64,11 @@
