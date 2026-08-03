@@ -47,9 +47,98 @@ jobs:
       - name: Probe hosted KVM prerequisite
         run: |
           ls -l /dev/kvm 2>/dev/null || true
-          if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-            echo 'KVM_PREREQUISITE=available'
+          if sudo test -c /dev/kvm; then
+            echo 'KVM_PREREQUISITE=available-to-root'
           else
             echo 'KVM_PREREQUISITE=unavailable'
-            echo 'The project workload/KVM lifecycle matrix remains a neutral environment skip on this runner.'
+            exit 1
           fi
+
+  lifecycle-runtime:
+    needs: focused
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BUILD_TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Apply retained source patch
+        run: patch --fuzz=0 --no-backup-if-mismatch -p1 < linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch
+      - name: Install narrow runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dbus-daemon \
+            dosfstools \
+            iproute2 \
+            libdbus-1-dev \
+            libseccomp-dev \
+            mtools \
+            pkg-config
+          sudo test -c /dev/kvm
+          sudo test -c /dev/net/tun
+      - name: Fetch verified Jammy and direct-kernel assets
+        run: |
+          cat >/tmp/lifecycle-assets.yaml <<'EOF'
+          assets:
+            - filename: jammy-server-cloudimg-amd64-custom-20241017-0.qcow2
+              url: https://ch-images.azureedge.net/jammy-server-cloudimg-amd64-custom-20241017-0.qcow2
+              sha1: 5f10738920efb74f0bf854cadcd1b1fd544e49c8
+              arch: [x86_64]
+              test: [lifecycle]
+            - filename: vmlinux-x86_64
+              url: https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.16.9-20260508/vmlinux-x86_64
+              sha1: 322b3850a8247077def70845559c6752b7d5f49b
+              arch: [x86_64]
+              test: [lifecycle]
+          EOF
+          python3 scripts/fetch_workloads.py \
+            --asset-file /tmp/lifecycle-assets.yaml \
+            --test lifecycle \
+            --workloads-dir "$HOME/workloads" \
+            -j 2
+      - name: Build exact candidate binaries and integration test
+        run: |
+          cargo build \
+            --release \
+            --target "$BUILD_TARGET" \
+            -p cloud-hypervisor \
+            --features dbus_api \
+            --bins
+          RUSTFLAGS='--cfg devcli_testenv' cargo test \
+            --target "$BUILD_TARGET" \
+            -p cloud-hypervisor \
+            --test integration \
+            --features dbus_api \
+            --no-run
+      - name: Run exact HTTP and D-Bus lifecycle matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_bin=$(find "target/$BUILD_TARGET/debug/deps" \
+            -maxdepth 1 -type f -perm -111 -name 'integration-*' \
+            | head -n 1)
+          test -n "$test_bin"
+          mkdir -p /tmp/lifecycle-logs
+          for selector in \
+            common_parallel::test_api_http_shutdown \
+            common_parallel::test_api_http_delete \
+            dbus_api::test_api_dbus_shutdown \
+            dbus_api::test_api_dbus_delete; do
+            log=/tmp/lifecycle-logs/${selector//::/_}.log
+            sudo env \
+              HOME="$HOME" \
+              PATH="$PATH" \
+              BUILD_TARGET="$BUILD_TARGET" \
+              RUST_BACKTRACE=1 \
+              dbus-run-session -- \
+                "$test_bin" "$selector" \
+                --exact --nocapture --test-threads=1 \
+              2>&1 | tee "$log"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-api-shutdown-runtime
+          path: /tmp/lifecycle-logs
+          if-no-files-found: warn
