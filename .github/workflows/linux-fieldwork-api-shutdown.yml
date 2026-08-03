@@ -16,8 +16,10 @@ jobs:
   focused:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RUSTFLAGS: --cfg devcli_testenv
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Apply retained source patch
         run: patch --fuzz=0 --no-backup-if-mismatch -p1 < linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch
       - name: Verify candidate contract
@@ -34,10 +36,8 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
       - name: Compile HTTP and D-Bus integration tests
-        run: cargo check -p cloud-hypervisor --tests --features dbus_api
+        run: cargo test -p cloud-hypervisor --test integration --features dbus_api --no-run
       - name: Inventory exact lifecycle test selectors
-        env:
-          RUSTFLAGS: --cfg devcli_testenv
         run: |
           cargo test -p cloud-hypervisor --test integration --features dbus_api -- --list \
             | tee /tmp/integration-tests.txt
