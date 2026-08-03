@@ -35,3 +35,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Compile HTTP and D-Bus integration tests
         run: cargo check -p cloud-hypervisor --tests --features dbus_api
+      - name: Inventory exact lifecycle test selectors
+        run: |
+          cargo test -p cloud-hypervisor --test integration --features dbus_api -- --list \
+            | tee /tmp/integration-tests.txt
+          grep -E 'api_(shutdown|delete)' /tmp/integration-tests.txt
