@@ -36,6 +36,8 @@ jobs:
       - name: Compile HTTP and D-Bus integration tests
         run: cargo check -p cloud-hypervisor --tests --features dbus_api
       - name: Inventory exact lifecycle test selectors
+        env:
+          RUSTFLAGS: --cfg devcli_testenv
         run: |
           cargo test -p cloud-hypervisor --test integration --features dbus_api -- --list \
             | tee /tmp/integration-tests.txt
