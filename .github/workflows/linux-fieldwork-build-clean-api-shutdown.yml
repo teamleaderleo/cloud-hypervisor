@@ -1,0 +1,62 @@
+name: Build clean API shutdown candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/api-shutdown-clean-builder
+
+permissions:
+  contents: write
+
+jobs:
+  build-clean-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Apply verified candidate and construct one clean commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=ae04fa80b2e0e52b7a9f4b3fd4239698df586673
+          target=linux-fieldwork/api-shutdown-events-clean
+          workflow=.github/workflows/linux-fieldwork-build-clean-api-shutdown.yml
+
+          git fetch origin linux-fieldwork/api-shutdown-events
+          git show origin/linux-fieldwork/api-shutdown-events:linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch \
+            > /tmp/api-shutdown.patch
+          patch --fuzz=0 --no-backup-if-mismatch -p1 < /tmp/api-shutdown.patch
+
+          cargo fmt --all -- --check
+          git diff --check
+
+          git rm "$workflow"
+          git add cloud-hypervisor/tests/common/tests_wrappers.rs
+          tree=$(git write-tree)
+
+          export GIT_AUTHOR_NAME=leo03164
+          export GIT_AUTHOR_EMAIL=leo03164@gmail.com
+          export GIT_COMMITTER_NAME=leo03164
+          export GIT_COMMITTER_EMAIL=leo03164@gmail.com
+
+          commit=$(cat <<'EOF' | git commit-tree "$tree" -p "$base"
+tests: use shutdown events for API lifecycle gates
+
+The API shutdown and delete tests currently treat loss of SSH as proof
+that guest shutdown completed. sshd can stop while guest and VMM cleanup
+is still in progress, but the tests immediately reuse the VM and disk.
+
+Start these VMMs with --no-shutdown and an event monitor. Power the guest
+off normally, wait for the exact shutdown event, and only then perform
+the next API lifecycle transition.
+
+Fixes: #8046
+
+Signed-off-by: leo03164 <leo03164@gmail.com>
+EOF
+          )
+
+          git push --force origin "$commit:refs/heads/$target"
+          echo "clean_candidate_commit=$commit"
