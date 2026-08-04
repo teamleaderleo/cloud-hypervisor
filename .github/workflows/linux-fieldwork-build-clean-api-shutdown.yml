@@ -1,9 +1,6 @@
 name: Build clean API shutdown candidate
 
 on:
-  push:
-    branches:
-      - linux-fieldwork/api-shutdown-clean-builder
   pull_request:
     branches:
       - linux-fieldwork/api-shutdown-clean-builder-base
