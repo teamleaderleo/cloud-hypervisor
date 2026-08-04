@@ -6,7 +6,7 @@ on:
       - linux-fieldwork/api-shutdown-clean-builder
   pull_request:
     branches:
-      - linux-fieldwork/upstream-main-snapshot-2026-08-05
+      - linux-fieldwork/api-shutdown-clean-builder-base
 
 permissions:
   contents: write
