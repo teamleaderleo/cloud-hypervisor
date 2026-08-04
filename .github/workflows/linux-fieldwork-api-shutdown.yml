@@ -74,10 +74,11 @@ jobs:
             libdbus-1-dev \
             libseccomp-dev \
             mtools \
-            pkg-config
+            pkg-config \
+            qemu-utils
           sudo test -c /dev/kvm
           sudo test -c /dev/net/tun
-      - name: Fetch verified Jammy and direct-kernel assets
+      - name: Fetch and prepare verified Jammy and direct-kernel assets
         run: |
           cat >/tmp/lifecycle-assets.yaml <<'EOF'
           assets:
@@ -97,11 +98,19 @@ jobs:
             --test lifecycle \
             --workloads-dir "$HOME/workloads" \
             -j 2
+          qemu-img convert \
+            -p \
+            -f qcow2 \
+            -O raw \
+            "$HOME/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.qcow2" \
+            "$HOME/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.raw"
+          echo 'c1dfbe7abde400e675844568dbe9d3914222f6de  /home/runner/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.raw' \
+            | sha1sum --check --strict
           sudo rm -rf /root/workloads
           sudo ln -s "$HOME/workloads" /root/workloads
-          sudo test -f /root/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.qcow2
+          sudo test -f /root/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.raw
           sudo test -f /root/workloads/vmlinux-x86_64
-          sudo ls -l /root/workloads
+          sudo ls -lh /root/workloads
           sudo install -d -m 0700 /tmp/linux-fieldwork-root-runtime
       - name: Build exact candidate binaries and integration test
         run: |
