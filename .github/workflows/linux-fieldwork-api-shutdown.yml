@@ -97,7 +97,11 @@ jobs:
             --test lifecycle \
             --workloads-dir "$HOME/workloads" \
             -j 2
-          sudo ln -sfn "$HOME/workloads" /root/workloads
+          sudo rm -rf /root/workloads
+          sudo ln -s "$HOME/workloads" /root/workloads
+          sudo test -f /root/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.qcow2
+          sudo test -f /root/workloads/vmlinux-x86_64
+          sudo ls -l /root/workloads
           sudo install -d -m 0700 /tmp/linux-fieldwork-root-runtime
       - name: Build exact candidate binaries and integration test
         run: |
