@@ -97,6 +97,8 @@ jobs:
             --test lifecycle \
             --workloads-dir "$HOME/workloads" \
             -j 2
+          sudo ln -sfn "$HOME/workloads" /root/workloads
+          sudo install -d -m 0700 /tmp/linux-fieldwork-root-runtime
       - name: Build exact candidate binaries and integration test
         run: |
           cargo build \
@@ -127,7 +129,8 @@ jobs:
             dbus_api::test_api_dbus_delete; do
             log=/tmp/lifecycle-logs/${selector//::/_}.log
             sudo env \
-              HOME="$HOME" \
+              HOME=/root \
+              XDG_RUNTIME_DIR=/tmp/linux-fieldwork-root-runtime \
               PATH="$PATH" \
               BUILD_TARGET="$BUILD_TARGET" \
               RUST_BACKTRACE=1 \
