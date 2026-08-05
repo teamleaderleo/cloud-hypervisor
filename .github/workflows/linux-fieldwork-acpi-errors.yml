@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - linux-fieldwork/acpi-error-propagation
+  pull_request:
+    branches:
+      - linux-fieldwork/acpi-error-upstream-snapshot
   workflow_dispatch:
 
 permissions:
