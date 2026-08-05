@@ -36,4 +36,19 @@ if script.count(old) != 1:
     raise RuntimeError("failed to repair ACPI call-site propagation")
 script = script.replace(old, new, 1)
 
+old = '''    let vgic = interrupt_controller
+        .lock()
+        .map_err(poisoned_lock)?
+        .get_vgic()
+        .ok_or(AcpiError::MissingVgic)?;'''
+new = '''    let interrupt_controller = interrupt_controller
+        .lock()
+        .map_err(poisoned_lock)?;
+    let vgic = interrupt_controller
+        .get_vgic()
+        .ok_or(AcpiError::MissingVgic)?;'''
+if script.count(old) != 1:
+    raise RuntimeError("failed to extend aarch64 interrupt-controller guard lifetime")
+script = script.replace(old, new, 1)
+
 exec(compile(script, str(script_path), "exec"), {"__name__": "__main__"})
