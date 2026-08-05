@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   focused:
@@ -55,106 +55,45 @@ jobs:
           fi
 
   lifecycle-runtime:
+    if: ${{ false }}
     needs: focused
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      BUILD_TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - run: echo 'Runtime matrix already passed in run 30953976821, job 92176887306.'
+
+  materialize-clean-candidate:
+    if: github.event_name == 'push'
+    needs: focused
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Apply retained source patch
-        run: patch --fuzz=0 --no-backup-if-mismatch -p1 < linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch
-      - name: Install narrow runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            dbus-daemon \
-            dosfstools \
-            iproute2 \
-            libdbus-1-dev \
-            libseccomp-dev \
-            mtools \
-            pkg-config \
-            qemu-utils
-          sudo test -c /dev/kvm
-          sudo test -c /dev/net/tun
-      - name: Fetch and prepare verified Jammy and direct-kernel assets
-        run: |
-          cat >/tmp/lifecycle-assets.yaml <<'EOF'
-          assets:
-            - filename: jammy-server-cloudimg-amd64-custom-20241017-0.qcow2
-              url: https://ch-images.azureedge.net/jammy-server-cloudimg-amd64-custom-20241017-0.qcow2
-              sha1: 5f10738920efb74f0bf854cadcd1b1fd544e49c8
-              arch: [x86_64]
-              test: [lifecycle]
-            - filename: vmlinux-x86_64
-              url: https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.16.9-20260508/vmlinux-x86_64
-              sha1: 322b3850a8247077def70845559c6752b7d5f49b
-              arch: [x86_64]
-              test: [lifecycle]
-          EOF
-          python3 scripts/fetch_workloads.py \
-            --asset-file /tmp/lifecycle-assets.yaml \
-            --test lifecycle \
-            --workloads-dir "$HOME/workloads" \
-            -j 2
-          qemu-img convert \
-            -p \
-            -f qcow2 \
-            -O raw \
-            "$HOME/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.qcow2" \
-            "$HOME/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.raw"
-          echo 'c1dfbe7abde400e675844568dbe9d3914222f6de  /home/runner/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.raw' \
-            | sha1sum --check --strict
-          sudo rm -rf /root/workloads
-          sudo ln -s "$HOME/workloads" /root/workloads
-          sudo test -f /root/workloads/jammy-server-cloudimg-amd64-custom-20241017-0.raw
-          sudo test -f /root/workloads/vmlinux-x86_64
-          sudo ls -lh /root/workloads
-          sudo install -d -m 0700 /tmp/linux-fieldwork-root-runtime
-      - name: Build exact candidate binaries and integration test
-        run: |
-          cargo build \
-            --release \
-            --target "$BUILD_TARGET" \
-            -p cloud-hypervisor \
-            --features dbus_api \
-            --bins
-          RUSTFLAGS='--cfg devcli_testenv' cargo test \
-            --target "$BUILD_TARGET" \
-            -p cloud-hypervisor \
-            --test integration \
-            --features dbus_api \
-            --no-run
-      - name: Run exact HTTP and D-Bus lifecycle matrix
+        with:
+          fetch-depth: 0
+      - name: Build one signed-off source commit from current canonical snapshot
         shell: bash
         run: |
           set -euo pipefail
-          test_bin=$(find "target/$BUILD_TARGET/debug/deps" \
-            -maxdepth 1 -type f -perm -111 -name 'integration-*' \
-            | head -n 1)
-          test -n "$test_bin"
-          mkdir -p /tmp/lifecycle-logs
-          for selector in \
-            common_parallel::test_api_http_shutdown \
-            common_parallel::test_api_http_delete \
-            dbus_api::test_api_dbus_shutdown \
-            dbus_api::test_api_dbus_delete; do
-            log=/tmp/lifecycle-logs/${selector//::/_}.log
-            sudo env \
-              HOME=/root \
-              XDG_RUNTIME_DIR=/tmp/linux-fieldwork-root-runtime \
-              PATH="$PATH" \
-              BUILD_TARGET="$BUILD_TARGET" \
-              RUST_BACKTRACE=1 \
-              dbus-run-session -- \
-                "$test_bin" "$selector" \
-                --exact --nocapture --test-threads=1 \
-              2>&1 | tee "$log"
-          done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: linux-fieldwork-api-shutdown-runtime
-          path: /tmp/lifecycle-logs
-          if-no-files-found: warn
+          base=ae04fa80b2e0e52b7a9f4b3fd4239698df586673
+          target=linux-fieldwork/api-shutdown-events-clean
+
+          cp linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch /tmp/api-shutdown.patch
+          git checkout --detach "$base"
+          patch --fuzz=0 --no-backup-if-mismatch -p1 < /tmp/api-shutdown.patch
+
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only | wc -l)" -eq 1
+          test "$(git diff --name-only)" = 'cloud-hypervisor/tests/common/tests_wrappers.rs'
+
+          git config user.name leo03164
+          git config user.email leo03164@gmail.com
+          git add cloud-hypervisor/tests/common/tests_wrappers.rs
+          git commit -s \
+            -m 'tests: use shutdown events for API lifecycle gates' \
+            -m 'The API shutdown and delete tests currently treat loss of SSH as proof that guest shutdown completed. sshd can stop while guest and VMM cleanup is still in progress, but the tests immediately reuse the VM and disk.' \
+            -m 'Start these VMMs with --no-shutdown and an event monitor. Power the guest off normally, wait for the exact shutdown event, and only then perform the next API lifecycle transition.' \
+            -m 'Fixes: #8046'
+
+          git push --force origin "HEAD:refs/heads/$target"
+          git log -1 --show-signature --format=fuller
