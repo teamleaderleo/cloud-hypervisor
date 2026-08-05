@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import subprocess
 from pathlib import Path
 
 script_path = Path(__file__).with_name("apply_candidate.py")
@@ -52,3 +53,5 @@ if script.count(old) != 1:
 script = script.replace(old, new, 1)
 
 exec(compile(script, str(script_path), "exec"), {"__name__": "__main__"})
+subprocess.run(["cargo", "fmt", "--all"], check=True)
+print("acpi-error-candidate-formatted")
