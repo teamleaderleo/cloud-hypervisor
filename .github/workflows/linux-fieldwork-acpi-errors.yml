@@ -1,0 +1,50 @@
+name: Linux Fieldwork ACPI errors
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/acpi-error-propagation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Apply exact-source candidate
+        run: python3 linux-fieldwork/acpi-errors/apply_candidate.py
+      - name: Verify candidate scope
+        run: |
+          git diff --check
+          git diff --name-only | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 2
+          grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Focused arithmetic unit test
+        run: cargo test -p vmm test_next_table_address_overflow
+      - name: Default vmm compile
+        run: cargo check -p vmm
+      - name: fw_cfg vmm compile
+        run: cargo check -p vmm --features fw_cfg
+      - name: TDX vmm compile
+        run: cargo check -p vmm --features tdx
+      - name: aarch64 vmm compile
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check -p vmm --target aarch64-unknown-linux-gnu
+      - name: Retain candidate diff
+        run: git diff --binary > /tmp/acpi-error-propagation.patch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-acpi-error-candidate
+          path: |
+            /tmp/acpi-error-propagation.patch
+            /tmp/changed-files.txt
+          if-no-files-found: warn
