@@ -14,14 +14,14 @@ old = '''vm = replace_once(
 '''
 new = '''vm = replace_once(
     vm,
-    ''' + '"""' + '''        #[cfg(feature = "tdx")]
+    """        #[cfg(feature = "tdx")]
         if self.config.lock().unwrap().is_tdx_enabled() {
             return None;
-        }''' + '"""' + ''',
-    ''' + '"""' + '''        #[cfg(feature = "tdx")]
+        }""",
+    """        #[cfg(feature = "tdx")]
         if self.config.lock().unwrap().is_tdx_enabled() {
             return Ok(None);
-        }''' + '"""' + ''',
+        }""",
     "TDX no-op return",
 )
 '''
@@ -37,12 +37,18 @@ if script.count(old) != 1:
     raise RuntimeError("failed to repair ACPI call-site propagation")
 script = script.replace(old, new, 1)
 
-old = '''    let vgic = interrupt_controller
+old = '''    let interrupt_controller = device_manager
+        .get_interrupt_controller()
+        .ok_or(AcpiError::MissingInterruptController)?;
+    let vgic = interrupt_controller
         .lock()
         .map_err(poisoned_lock)?
         .get_vgic()
         .ok_or(AcpiError::MissingVgic)?;'''
-new = '''    let interrupt_controller = interrupt_controller
+new = '''    let interrupt_controller = device_manager
+        .get_interrupt_controller()
+        .ok_or(AcpiError::MissingInterruptController)?;
+    let interrupt_controller = interrupt_controller
         .lock()
         .map_err(poisoned_lock)?;
     let vgic = interrupt_controller
