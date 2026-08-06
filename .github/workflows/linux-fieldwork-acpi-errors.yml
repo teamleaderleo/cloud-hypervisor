@@ -30,17 +30,17 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
       - name: Focused arithmetic unit test
-        run: cargo test -p vmm test_next_table_address_overflow
-      - name: Default vmm compile
-        run: cargo check -p vmm
+        run: cargo test -p vmm --features kvm test_next_table_address_overflow
+      - name: KVM vmm compile
+        run: cargo check -p vmm --features kvm
       - name: fw_cfg vmm compile
-        run: cargo check -p vmm --features fw_cfg
+        run: cargo check -p vmm --features kvm,fw_cfg
       - name: TDX vmm compile
-        run: cargo check -p vmm --features tdx
+        run: cargo check -p vmm --features kvm,tdx
       - name: aarch64 vmm compile
         run: |
           rustup target add aarch64-unknown-linux-gnu
-          cargo check -p vmm --target aarch64-unknown-linux-gnu
+          cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
       - name: Retain candidate diff
         run: git diff --binary > /tmp/acpi-error-propagation.patch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
