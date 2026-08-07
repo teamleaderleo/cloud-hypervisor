@@ -73,7 +73,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base=ae04fa80b2e0e52b7a9f4b3fd4239698df586673
+          base=538237492941914440eec589ae4d2bfe33f7f108
           target=linux-fieldwork/api-shutdown-events-clean
 
           cp linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch /tmp/api-shutdown.patch
@@ -88,11 +88,24 @@ jobs:
           git config user.name leo03164
           git config user.email leo03164@gmail.com
           git add cloud-hypervisor/tests/common/tests_wrappers.rs
-          git commit -s \
-            -m 'tests: use shutdown events for API lifecycle gates' \
-            -m 'The API shutdown and delete tests currently treat loss of SSH as proof that guest shutdown completed. sshd can stop while guest and VMM cleanup is still in progress, but the tests immediately reuse the VM and disk.' \
-            -m 'Start these VMMs with --no-shutdown and an event monitor. Power the guest off normally, wait for the exact shutdown event, and only then perform the next API lifecycle transition.' \
-            -m 'Fixes: #8046'
+          cat >/tmp/commit-message <<'EOF'
+          tests: use shutdown events for API lifecycle gates
+
+          The API shutdown and delete tests currently treat loss of SSH as
+          proof that guest shutdown completed. sshd can stop while guest and
+          VMM cleanup is still in progress, but the tests immediately reuse
+          the VM and disk.
+
+          Start these VMMs with --no-shutdown and an event monitor. Power the
+          guest off normally, wait for the exact shutdown event, and only then
+          perform the next API lifecycle transition.
+
+          Fixes #8046
+
+          Assisted-by: ChatGPT:GPT-5.6 Thinking
+          EOF
+          sed -i 's/^          //' /tmp/commit-message
+          git commit -s -F /tmp/commit-message
 
           git push --force origin "HEAD:refs/heads/$target"
-          git log -1 --show-signature --format=fuller
+          git log -1 --format=fuller
