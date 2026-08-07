@@ -62,7 +62,6 @@ jobs:
       - run: echo 'Runtime matrix already passed in run 30953976821, job 92176887306.'
 
   materialize-clean-candidate:
-    needs: focused
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
