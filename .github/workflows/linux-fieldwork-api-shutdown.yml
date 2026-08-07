@@ -26,7 +26,7 @@ jobs:
       - run: echo 'Runtime matrix already passed in run 30953976821, job 92176887306.'
 
   materialize-clean-candidate:
-    runs-on: ubuntu-22.04
+    runs-on: macos-14
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,7 +41,7 @@ jobs:
 
           cp linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch /tmp/api-shutdown.patch
           git checkout --detach "$base"
-          patch --fuzz=0 --no-backup-if-mismatch -p1 < /tmp/api-shutdown.patch
+          patch -p1 < /tmp/api-shutdown.patch
 
           cargo fmt --all -- --check
           git diff --check
@@ -67,7 +67,6 @@ jobs:
 
           Assisted-by: ChatGPT:GPT-5.6 Thinking
           EOF
-          sed -i 's/^          //' /tmp/commit-message
           git commit -s -F /tmp/commit-message
 
           git push --force origin "HEAD:refs/heads/$target"
