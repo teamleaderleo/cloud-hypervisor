@@ -12,8 +12,8 @@ a service-level proxy with the VMM-owned state transition.
 
 Addresses cloud-hypervisor#8046.
 ---
- cloud-hypervisor/tests/common/tests_wrappers.rs | 46 ++++++++++++++---------
- 1 file changed, 26 insertions(+), 20 deletions(-)
+ cloud-hypervisor/tests/common/tests_wrappers.rs | 54 +++++++++++++++++---------
+ 1 file changed, 34 insertions(+), 20 deletions(-)
 
 diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/tests/common/tests_wrappers.rs
 --- a/cloud-hypervisor/tests/common/tests_wrappers.rs
@@ -30,7 +30,7 @@ diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/
          .capture_output()
          .spawn()
          .unwrap();
-@@ -93,16 +96,16 @@
+@@ -93,16 +96,20 @@
          guest.validate_cpu_count(None);
          guest.validate_memory(None);
  
@@ -44,7 +44,11 @@ diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/
 -
 -        // Then shut it down
 -        assert!(target_api.remote_command("shutdown", None));
++        // Power off the guest normally. --no-shutdown keeps the VMM alive so
++        // the same VM can be used for the next lifecycle transition.
 +        guest.ssh_command("sudo poweroff").unwrap();
++
++        // Wait for the VMM to report completed shutdown before reusing the VM.
 +        let latest_events = [&MetaEvent {
 +            event: "shutdown".to_string(),
 +            device_id: None,
@@ -57,7 +61,7 @@ diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/
  
          // Then boot it again
          assert!(target_api.remote_command("boot", None));
-@@ -124,8 +127,11 @@
+@@ -124,8 +131,11 @@
  // From the API: Create a VM, boot it and check it can be deleted and then recreated
  // booted again.
  pub(crate) fn _test_api_delete(target_api: &TargetApi, guest: &Guest) {
@@ -69,7 +73,7 @@ diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/
          .capture_output()
          .spawn()
          .unwrap();
-@@ -153,13 +159,16 @@
+@@ -153,13 +163,20 @@
          guest.validate_cpu_count(None);
          guest.validate_memory(None);
  
@@ -80,7 +84,11 @@ diff --git a/cloud-hypervisor/tests/common/tests_wrappers.rs b/cloud-hypervisor/
 -
 -        // Wait for the guest to be fully shutdown
 -        assert!(guest.wait_for_ssh_unresponsive(Duration::from_secs(20)));
++        // Power off the guest normally. --no-shutdown keeps the VMM alive so
++        // the same process can service the following delete/create sequence.
 +        guest.ssh_command("sudo poweroff").unwrap();
++
++        // Wait for the VMM to report completed shutdown before deleting the VM.
 +        let latest_events = [&MetaEvent {
 +            event: "shutdown".to_string(),
 +            device_id: None,
