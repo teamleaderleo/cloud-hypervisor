@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   focused:
@@ -26,48 +26,7 @@ jobs:
       - run: echo 'Runtime matrix already passed in run 30953976821, job 92176887306.'
 
   materialize-clean-candidate:
-    runs-on: macos-14
-    timeout-minutes: 30
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - name: Build one signed-off source commit from current canonical snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          base=538237492941914440eec589ae4d2bfe33f7f108
-          target=linux-fieldwork/api-shutdown-events-clean
-
-          cp linux-fieldwork/0001-tests-use-shutdown-events-for-api-lifecycle.patch /tmp/api-shutdown.patch
-          git checkout --detach "$base"
-          patch -p1 < /tmp/api-shutdown.patch
-
-          cargo fmt --all -- --check
-          git diff --check
-          test "$(git diff --name-only | wc -l)" -eq 1
-          test "$(git diff --name-only)" = 'cloud-hypervisor/tests/common/tests_wrappers.rs'
-
-          git config user.name leo03164
-          git config user.email leo03164@gmail.com
-          git add cloud-hypervisor/tests/common/tests_wrappers.rs
-          cat >/tmp/commit-message <<'EOF'
-          tests: use shutdown events for API lifecycle gates
-
-          The API shutdown and delete tests currently treat loss of SSH as
-          proof that guest shutdown completed. sshd can stop while guest and
-          VMM cleanup is still in progress, but the tests immediately reuse
-          the VM and disk.
-
-          Start these VMMs with --no-shutdown and an event monitor. Power the
-          guest off normally, wait for the exact shutdown event, and only then
-          perform the next API lifecycle transition.
-
-          Fixes #8046
-
-          Assisted-by: ChatGPT:GPT-5.6 Thinking
-          EOF
-          git commit -s -F /tmp/commit-message
-
-          git push --force origin "HEAD:refs/heads/$target"
-          git log -1 --format=fuller
+      - run: echo 'Clean candidate materialized and frozen at current upstream; see internal clean PR #4.'
