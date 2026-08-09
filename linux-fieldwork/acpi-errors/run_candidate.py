@@ -45,17 +45,13 @@ old = '''    let interrupt_controller = device_manager
         .map_err(poisoned_lock)?
         .get_vgic()
         .ok_or(AcpiError::MissingVgic)?;'''
-new = '''    let vgic = {
-        let interrupt_controller = device_manager
-            .get_interrupt_controller()
-            .ok_or(AcpiError::MissingInterruptController)?;
-        let interrupt_controller = interrupt_controller
-            .lock()
-            .map_err(poisoned_lock)?;
-        interrupt_controller
-            .get_vgic()
-            .ok_or(AcpiError::MissingVgic)?
-    };'''
+new = '''    let vgic = device_manager
+        .get_interrupt_controller()
+        .ok_or(AcpiError::MissingInterruptController)?
+        .lock()
+        .map_err(poisoned_lock)?
+        .get_vgic()
+        .map_err(|_| AcpiError::MissingVgic)?;'''
 if script.count(old) != 1:
     raise RuntimeError("failed to scope aarch64 interrupt-controller lookup")
 script = script.replace(old, new, 1)
