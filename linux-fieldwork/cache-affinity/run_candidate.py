@@ -180,6 +180,40 @@ def seed_old_candidate_preimages() -> None:
         run("git", "worktree", "remove", "--force", str(old_worktree))
 
 
+def adapt_affinity_fixtures_to_final_helpers() -> None:
+    cache_file = Path("arch/src/aarch64/cache.rs")
+    source = cache_file.read_text()
+    replacements = [
+        ("cache_path", 0, 1, "Data", "64K"),
+        ("cache_path", 1, 1, "Instruction", "64K"),
+        ("cache_path", 2, 2, "Unified", "1024K"),
+        ("cache_path", 3, 3, "Unified", "4096K"),
+        ("cpu0_cache", 0, 1, "Data", "32K"),
+        ("cpu0_cache", 1, 1, "Instruction", "32K"),
+        ("cpu0_cache", 2, 2, "Unified", "256K"),
+        ("cpu0_cache", 3, 3, "Unified", "4096K"),
+        ("cpu4_cache", 0, 1, "Data", "64K"),
+        ("cpu4_cache", 1, 1, "Instruction", "64K"),
+        ("cpu4_cache", 2, 2, "Unified", "1024K"),
+        ("cpu4_cache", 3, 3, "Unified", "4096K"),
+    ]
+
+    for variable, index, level, cache_type, size in replacements:
+        old = (
+            f'write_identity(&{variable}, {index}, {level}, "{cache_type}", "{size}");'
+        )
+        new = (
+            f'write_identity(&{variable}, {index}, {level}, "{cache_type}");\n'
+            f'        write_property(&{variable}, {index}, "size", "{size}");'
+        )
+        count = source.count(old)
+        if count != 1:
+            raise RuntimeError(f"expected one affinity fixture call {old!r}, found {count}")
+        source = source.replace(old, new)
+
+    cache_file.write_text(source)
+
+
 for path, expected in EXPECTED_BLOBS.items():
     actual = output("git", "hash-object", path)
     if actual != expected:
@@ -285,9 +319,12 @@ apply_and_commit(
 )
 
 # With the historical preimage blobs restored to the shared object database,
-# three-way apply can perform an actual mechanical rebase of the frozen v2
-# candidate onto the refreshed prerequisite chain.
+# three-way apply performs the mechanical part of the frozen v2 restack. The
+# only source-level API drift is in the two new cache-root tests: final #541
+# split identity and scalar-property writes into separate helpers. Adapt those
+# fixture calls without changing the identities, sizes, or assertions.
 run("git", "apply", "--3way", str(CANDIDATE_PATH))
+adapt_affinity_fixtures_to_final_helpers()
 run("cargo", "+nightly", "fmt", "--all", "--", "--check")
 
 print("cache-affinity-old-preimages-reconstructed")
@@ -297,4 +334,5 @@ print("cache-affinity-final-cache-identity-prerequisite-applied")
 print("cache-affinity-final-cache-sharing-prerequisite-applied")
 print("cache-affinity-stored-candidate-verified")
 print("cache-affinity-stored-candidate-three-way-restacked")
+print("cache-affinity-fixtures-adapted-to-final-helpers")
 print("cache-affinity-candidate-format-verified")
