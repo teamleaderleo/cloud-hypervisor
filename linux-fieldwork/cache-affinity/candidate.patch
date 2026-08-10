@@ -1,5 +1,5 @@
 diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
-index aeb2a40..6a579f9 100644
+index aeb2a40c1..6a579f9f0 100644
 --- a/arch/src/aarch64/cache.rs
 +++ b/arch/src/aarch64/cache.rs
 @@ -14,6 +14,7 @@ use log::warn;
@@ -111,7 +111,7 @@ index aeb2a40..6a579f9 100644
 +    }
  }
 diff --git a/arch/src/aarch64/fdt.rs b/arch/src/aarch64/fdt.rs
-index 8b6b4bd..047c77f 100644
+index 8b6b4bd67..047c77ff6 100644
 --- a/arch/src/aarch64/fdt.rs
 +++ b/arch/src/aarch64/fdt.rs
 @@ -26,7 +26,7 @@ use vm_fdt::{FdtWriter, FdtWriterResult};
@@ -164,7 +164,7 @@ index 8b6b4bd..047c77f 100644
      let CacheTopologyInfo {
          l1_d_cache_size,
 diff --git a/arch/src/aarch64/mod.rs b/arch/src/aarch64/mod.rs
-index f70d75e..bca4f69 100644
+index f70d75e77..bca4f691d 100644
 --- a/arch/src/aarch64/mod.rs
 +++ b/arch/src/aarch64/mod.rs
 @@ -130,6 +130,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
@@ -184,7 +184,7 @@ index f70d75e..bca4f69 100644
          gic_device,
          initrd,
 diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
-index 4e99026..a0ac725 100644
+index 4e99026cc..a0ac72501 100644
 --- a/vmm/src/cpu.rs
 +++ b/vmm/src/cpu.rs
 @@ -12,9 +12,11 @@
@@ -377,7 +377,7 @@ index 4e99026..a0ac725 100644
 +    }
 +}
 diff --git a/vmm/src/vm.rs b/vmm/src/vm.rs
-index 8f80361..787aabe 100644
+index 8f8036127..787aabe66 100644
 --- a/vmm/src/vm.rs
 +++ b/vmm/src/vm.rs
 @@ -1859,8 +1859,14 @@ impl Vm {
@@ -413,3 +413,16 @@ index 8f80361..787aabe 100644
              &dev_info,
              &gic,
              &None,
+diff --git a/vmm/src/vm_config.rs b/vmm/src/vm_config.rs
+index 3cea9e18a..1b46515e2 100644
+--- a/vmm/src/vm_config.rs
++++ b/vmm/src/vm_config.rs
+@@ -1216,7 +1216,7 @@ impl VmConfig {
+ 
+         #[cfg(target_arch = "aarch64")]
+         {
+-            landlock.add_rule_with_access(Path::new("/sys/devices/system/cpu/cpu0/cache"), "r")?;
++            landlock.add_rule_with_access(Path::new("/sys/devices/system/cpu"), "r")?;
+         }
+ 
+         if let Some(mem_zones) = &self.memory.zones {
