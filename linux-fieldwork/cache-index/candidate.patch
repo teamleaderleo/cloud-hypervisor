@@ -1,0 +1,242 @@
+diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
+index c2bfbc0..aeb2a40 100644
+--- a/arch/src/aarch64/cache.rs
++++ b/arch/src/aarch64/cache.rs
+@@ -82,6 +82,92 @@ fn read_optional_property(path: &Path) -> Result<Option<String>> {
+     }
+ }
+ 
++#[derive(Copy, Clone, Debug, Eq, PartialEq)]
++enum CacheLayoutStatus {
++    Empty,
++    Supported,
++    Unsupported,
++}
++
++fn cache_index_path(cache_path: &Path, index: u8) -> PathBuf {
++    cache_path.join(format!("index{index}"))
++}
++
++fn cache_index_exists(cache_path: &Path, index: u8) -> Result<bool> {
++    let path = cache_index_path(cache_path, index);
++    match fs::metadata(&path) {
++        Ok(_) => Ok(true),
++        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
++        Err(source) => Err(Error::AccessCacheTopology { path, source }),
++    }
++}
++
++fn cache_identity_matches(
++    cache_path: &Path,
++    index: u8,
++    expected_level: u32,
++    expected_type: &str,
++) -> Result<Option<bool>> {
++    if !cache_index_exists(cache_path, index)? {
++        return Ok(None);
++    }
++
++    let index_path = cache_index_path(cache_path, index);
++    let level_path = index_path.join("level");
++    let cache_type_path = index_path.join("type");
++    let Some(level) = read_optional_property(&level_path)? else {
++        return Ok(Some(false));
++    };
++    let Some(cache_type) = read_optional_property(&cache_type_path)? else {
++        return Ok(Some(false));
++    };
++    let level = level
++        .trim()
++        .parse::<u32>()
++        .map_err(|source| Error::ParseCacheProperty {
++            path: level_path,
++            source,
++        })?;
++
++    Ok(Some(
++        level == expected_level && cache_type.trim() == expected_type,
++    ))
++}
++
++fn cache_layout_status(cache_path: &Path) -> Result<CacheLayoutStatus> {
++    if !cache_index_exists(cache_path, 0)? {
++        for index in 1..=4 {
++            if cache_index_exists(cache_path, index)? {
++                return Ok(CacheLayoutStatus::Unsupported);
++            }
++        }
++        return Ok(CacheLayoutStatus::Empty);
++    }
++
++    let expected = [
++        (0, 1, "Data", true),
++        (1, 1, "Instruction", true),
++        (2, 2, "Unified", false),
++        (3, 3, "Unified", false),
++    ];
++    let mut missing_optional = false;
++
++    for (index, level, cache_type, required) in expected {
++        match cache_identity_matches(cache_path, index, level, cache_type)? {
++            Some(true) if !missing_optional => {}
++            Some(_) => return Ok(CacheLayoutStatus::Unsupported),
++            None if required => return Ok(CacheLayoutStatus::Unsupported),
++            None => missing_optional = true,
++        }
++    }
++
++    if cache_index_exists(cache_path, 4)? {
++        return Ok(CacheLayoutStatus::Unsupported);
++    }
++
++    Ok(CacheLayoutStatus::Supported)
++}
++
+ fn get_cache_size_from(cache_path: &Path, cache_level: CacheLevel) -> Result<u32> {
+     let path = cache_property_path(cache_path, cache_level, "size");
+     let Some(src) = read_optional_property(&path)? else {
+@@ -201,6 +287,13 @@ fn read_cache_topology_from(cache_path: &Path) -> Result<Option<CacheTopologyInf
+         }
+     }
+ 
++    if cache_layout_status(cache_path)? == CacheLayoutStatus::Unsupported {
++        warn!(
++            "Cache topology at {cache_path:?} cannot be represented by the current AArch64 guest cache model; omitting cache information."
++        );
++        return Ok(None);
++    }
++
+     let mut info = CacheTopologyInfo {
+         l1_d_cache_size: get_cache_size_from(cache_path, CacheLevel::L1D)?,
+         l1_d_cache_line_size: get_cache_u32_from(
+@@ -284,6 +377,22 @@ mod tests {
+         fs::write(index_path.join(property), value).unwrap();
+     }
+ 
++    fn write_supported_l1_identity(cache_path: &Path) {
++        write_property(cache_path, 0, "level", "1\n");
++        write_property(cache_path, 0, "type", "Data\n");
++        write_property(cache_path, 1, "level", "1\n");
++        write_property(cache_path, 1, "type", "Instruction\n");
++    }
++
++    fn write_identity(cache_path: &Path, index: u8, level: u8, cache_type: &str, size: &str) {
++        write_property(cache_path, index, "level", &format!("{level}\n"));
++        write_property(cache_path, index, "type", &format!("{cache_type}\n"));
++        write_property(cache_path, index, "size", &format!("{size}\n"));
++        write_property(cache_path, index, "coherency_line_size", "64\n");
++        write_property(cache_path, index, "number_of_sets", "128\n");
++        write_property(cache_path, index, "shared_cpu_list", "0-3\n");
++    }
++
+     #[test]
+     fn test_missing_cache_root() {
+         let temp = TestDir::new();
+@@ -312,6 +421,9 @@ mod tests {
+         let temp = TestDir::new();
+         let cache_path = temp.path().join("cache");
+         fs::create_dir(&cache_path).unwrap();
++        write_supported_l1_identity(&cache_path);
++        write_property(&cache_path, 2, "level", "2\n");
++        write_property(&cache_path, 2, "type", "Unified\n");
+ 
+         write_property(&cache_path, 0, "size", "32K\n");
+         write_property(&cache_path, 0, "coherency_line_size", "64\n");
+@@ -337,6 +449,7 @@ mod tests {
+         let temp = TestDir::new();
+         let cache_path = temp.path().join("cache");
+         fs::create_dir(&cache_path).unwrap();
++        write_supported_l1_identity(&cache_path);
+         write_property(&cache_path, 0, "size", "32Q\n");
+ 
+         assert!(matches!(
+@@ -350,6 +463,7 @@ mod tests {
+         let temp = TestDir::new();
+         let cache_path = temp.path().join("cache");
+         fs::create_dir(&cache_path).unwrap();
++        write_supported_l1_identity(&cache_path);
+         write_property(&cache_path, 0, "coherency_line_size", "invalid\n");
+ 
+         assert!(matches!(
+@@ -363,6 +477,7 @@ mod tests {
+         let temp = TestDir::new();
+         let cache_path = temp.path().join("cache");
+         fs::create_dir_all(cache_path.join("index0/size")).unwrap();
++        write_supported_l1_identity(&cache_path);
+ 
+         assert!(matches!(
+             read_cache_topology_from(&cache_path),
+@@ -375,6 +490,7 @@ mod tests {
+         let temp = TestDir::new();
+         let cache_path = temp.path().join("cache");
+         fs::create_dir(&cache_path).unwrap();
++        write_supported_l1_identity(&cache_path);
+         write_property(&cache_path, 0, "size", "4194304K\n");
+ 
+         assert!(matches!(
+@@ -382,4 +498,65 @@ mod tests {
+             Err(Error::CacheSizeOverflow { .. })
+         ));
+     }
++
++    #[test]
++    fn test_split_l1_layout_is_preserved() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++
++        write_identity(&cache_path, 0, 1, "Data", "32K");
++        write_identity(&cache_path, 1, 1, "Instruction", "48K");
++        write_identity(&cache_path, 2, 2, "Unified", "1024K");
++        write_identity(&cache_path, 3, 3, "Unified", "32768K");
++
++        let info = read_cache_topology_from(&cache_path).unwrap().unwrap();
++        assert_eq!(info.l1_d_cache_size, 32 * 1024);
++        assert_eq!(info.l1_i_cache_size, 48 * 1024);
++        assert_eq!(info.l2_cache_size, 1024 * 1024);
++        assert_eq!(info.l3_cache_size, 32768 * 1024);
++    }
++
++    #[test]
++    fn test_unified_l1_layout_is_omitted() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++
++        write_identity(&cache_path, 0, 1, "Unified", "64K");
++        write_identity(&cache_path, 1, 2, "Unified", "2048K");
++        write_identity(&cache_path, 2, 3, "Unified", "32768K");
++
++        assert!(read_cache_topology_from(&cache_path).unwrap().is_none());
++    }
++
++    #[test]
++    fn test_split_l2_layout_is_omitted() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++
++        write_identity(&cache_path, 0, 1, "Data", "32K");
++        write_identity(&cache_path, 1, 1, "Instruction", "48K");
++        write_identity(&cache_path, 2, 2, "Data", "1024K");
++        write_identity(&cache_path, 3, 2, "Instruction", "1024K");
++        write_identity(&cache_path, 4, 3, "Unified", "32768K");
++
++        assert!(read_cache_topology_from(&cache_path).unwrap().is_none());
++    }
++
++    #[test]
++    fn test_extra_cache_level_is_omitted() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++
++        write_identity(&cache_path, 0, 1, "Data", "32K");
++        write_identity(&cache_path, 1, 1, "Instruction", "48K");
++        write_identity(&cache_path, 2, 2, "Unified", "1024K");
++        write_identity(&cache_path, 3, 3, "Unified", "32768K");
++        write_identity(&cache_path, 4, 4, "Unified", "65536K");
++
++        assert!(read_cache_topology_from(&cache_path).unwrap().is_none());
++    }
+ }
