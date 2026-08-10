@@ -1,0 +1,71 @@
+name: Linux Fieldwork AArch64 FDT L3 SMT candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/fdt-l3-smt
+  pull_request:
+    branches:
+      - linux-fieldwork/cache-affinity-upstream-snapshot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install AArch64 candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact prerequisites and candidate
+        run: python3 linux-fieldwork/fdt-l3-smt/run_candidate.py
+      - name: Verify one-file product scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 1
+          grep -Fx 'arch/src/aarch64/fdt.rs' /tmp/changed-files.txt
+      - name: Verify corrected package policy
+        run: python3 linux-fieldwork/fdt-l3-smt/verify_candidate.py | tee /tmp/fdt-l3-smt-candidate-policy.log
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute AArch64 L3 package tests
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu \
+            l3_package_id_tests -- --nocapture 2>&1 | tee /tmp/fdt-l3-smt-candidate-tests.log
+          grep -F 'test aarch64::fdt::l3_package_id_tests::test_l3_package_id_single_thread_control ... ok' /tmp/fdt-l3-smt-candidate-tests.log
+          grep -F 'test aarch64::fdt::l3_package_id_tests::test_l3_package_id_accounts_for_smt_threads ... ok' /tmp/fdt-l3-smt-candidate-tests.log
+      - name: AArch64 arch Clippy
+        run: cargo clippy -p arch --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: AArch64 KVM vmm compile
+        run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+      - name: AArch64 MSHV vmm compile
+        run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+      - name: x86_64 KVM regression compile
+        run: cargo check -p vmm --features kvm
+      - name: Retain candidate diff
+        run: |
+          git diff --binary HEAD -- arch/src/aarch64/fdt.rs > /tmp/fdt-l3-smt-candidate.patch
+          sha256sum /tmp/fdt-l3-smt-candidate.patch | tee /tmp/candidate-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-fdt-l3-smt-candidate
+          path: |
+            /tmp/changed-files.txt
+            /tmp/fdt-l3-smt-candidate-policy.log
+            /tmp/fdt-l3-smt-candidate-tests.log
+            /tmp/fdt-l3-smt-candidate.patch
+            /tmp/candidate-sha256.txt
+          if-no-files-found: warn
