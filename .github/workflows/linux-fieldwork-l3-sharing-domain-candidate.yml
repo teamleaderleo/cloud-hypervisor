@@ -45,7 +45,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu \
-            l3_sharing_domain -- --nocapture 2>&1 | tee /tmp/l3-sharing-domain-candidate-tests.log
+            test_common_topology_ -- --nocapture 2>&1 | tee /tmp/l3-sharing-domain-candidate-tests.log
           grep -F 'test aarch64::cache::tests::test_common_topology_preserves_one_l3_sharing_domain ... ok' /tmp/l3-sharing-domain-candidate-tests.log
           grep -F 'test aarch64::cache::tests::test_common_topology_omits_l3_across_distinct_sharing_domains ... ok' /tmp/l3-sharing-domain-candidate-tests.log
       - name: Full AArch64 cache regression
