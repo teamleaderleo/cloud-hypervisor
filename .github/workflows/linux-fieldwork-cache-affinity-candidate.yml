@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and stored candidate
+      - name: Apply exact prerequisites and refreshed candidate
         run: python3 linux-fieldwork/cache-affinity/run_candidate.py
       - name: Verify six-file product scope
         run: |
@@ -81,13 +81,15 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Verify exact candidate convergence
+      - name: Verify exact refreshed candidate convergence
         run: |
           git diff --binary --full-index HEAD -- \
             arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs \
             vmm/src/cpu.rs vmm/src/vm.rs vmm/src/vm_config.rs \
             > /tmp/cache-affinity-candidate.patch
-          echo 'b38cfe17b90a7cda804b8ad9bdcd921cab4891457d55674a0691b7f0da310498  linux-fieldwork/cache-affinity/candidate.patch' | sha256sum -c -
+          echo 'aec77fdcb31df5667bfbea0c688e00ea07a9750f5cdd1c9cdc9b1d67404939a0  linux-fieldwork/cache-affinity/candidate.patch' | sha256sum -c -
+          echo 'aec77fdcb31df5667bfbea0c688e00ea07a9750f5cdd1c9cdc9b1d67404939a0  /tmp/cache-affinity-candidate.patch' | sha256sum -c -
+          cmp linux-fieldwork/cache-affinity/candidate.patch /tmp/cache-affinity-candidate.patch
           git patch-id --stable < linux-fieldwork/cache-affinity/candidate.patch | awk '{print $1}' > /tmp/stored-patch-id.txt
           git patch-id --stable < /tmp/cache-affinity-candidate.patch | awk '{print $1}' > /tmp/generated-patch-id.txt
           cmp /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt
@@ -96,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: linux-fieldwork-cache-affinity-candidate-v2
+          name: linux-fieldwork-cache-affinity-candidate-v3
           path: |
             /tmp/changed-files.txt
             /tmp/cache-affinity-candidate-policy.log
