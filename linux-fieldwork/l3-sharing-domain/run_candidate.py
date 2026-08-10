@@ -121,14 +121,13 @@ fn read_common_cache_topology_from(
         };
 
         if current.l3_cache_size != 0 && current.l3_cache_shared {
-            let Some(current_domain) = read_l3_sharing_domain(&cache_path)? else {
-                l3_domain_mismatch = true;
-                continue;
-            };
-            match &l3_domain {
-                None => l3_domain = Some(current_domain),
-                Some(expected) if *expected == current_domain => {}
-                Some(_) => l3_domain_mismatch = true,
+            match read_l3_sharing_domain(&cache_path)? {
+                Some(current_domain) => match &l3_domain {
+                    None => l3_domain = Some(current_domain),
+                    Some(expected) if *expected == current_domain => {}
+                    Some(_) => l3_domain_mismatch = true,
+                },
+                None => l3_domain_mismatch = true,
             }
         }
 
