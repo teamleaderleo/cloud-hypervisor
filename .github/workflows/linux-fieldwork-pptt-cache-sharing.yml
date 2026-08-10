@@ -1,0 +1,71 @@
+name: Linux Fieldwork AArch64 PPTT cache sharing
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/pptt-cache-sharing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install AArch64 candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact prerequisites and generate candidate
+        run: python3 linux-fieldwork/pptt-cache-sharing/run_candidate.py
+      - name: Verify one-file product scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 1
+          grep -Fx 'vmm/src/cpu.rs' /tmp/changed-files.txt
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute PPTT cache-sharing policy tests
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p vmm --features kvm --target aarch64-unknown-linux-gnu pptt_cache_tests -- --nocapture 2>&1 | tee /tmp/pptt-cache-tests.log
+          grep -F 'test cpu::pptt_cache_tests::test_private_l2_shared_l3_are_representable ... ok' /tmp/pptt-cache-tests.log
+          grep -F 'test cpu::pptt_cache_tests::test_shared_l2_omits_l2_and_l3 ... ok' /tmp/pptt-cache-tests.log
+          grep -F 'test cpu::pptt_cache_tests::test_private_l3_is_omitted ... ok' /tmp/pptt-cache-tests.log
+          grep -F 'test cpu::pptt_cache_tests::test_l3_without_l2_is_omitted ... ok' /tmp/pptt-cache-tests.log
+      - name: Clean policy-test rerun
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: cargo test -p vmm --features kvm --target aarch64-unknown-linux-gnu pptt_cache_tests
+      - name: Focused AArch64 Clippy
+        run: cargo clippy -p vmm --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: AArch64 KVM vmm compile
+        run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+      - name: AArch64 MSHV vmm compile
+        run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+      - name: x86_64 KVM regression Clippy
+        run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
+      - name: Retain generated product diff
+        run: |
+          git diff --binary HEAD -- vmm/src/cpu.rs > /tmp/pptt-cache-sharing.patch
+          sha256sum /tmp/pptt-cache-sharing.patch | tee /tmp/candidate-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-pptt-cache-sharing
+          path: |
+            /tmp/changed-files.txt
+            /tmp/pptt-cache-tests.log
+            /tmp/pptt-cache-sharing.patch
+            /tmp/candidate-sha256.txt
+          if-no-files-found: warn
