@@ -1,0 +1,110 @@
+name: Linux Fieldwork AArch64 cache affinity candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/cache-affinity-selection
+  pull_request:
+    branches:
+      - linux-fieldwork/cache-affinity-upstream-snapshot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install AArch64 candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact prerequisites and refreshed candidate
+        run: python3 linux-fieldwork/cache-affinity/run_candidate.py
+      - name: Verify six-file product scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 6
+          grep -Fx 'arch/src/aarch64/cache.rs' /tmp/changed-files.txt
+          grep -Fx 'arch/src/aarch64/fdt.rs' /tmp/changed-files.txt
+          grep -Fx 'arch/src/aarch64/mod.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/cpu.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/vm_config.rs' /tmp/changed-files.txt
+      - name: Verify selector and Landlock policy
+        run: python3 linux-fieldwork/cache-affinity/verify_candidate.py | tee /tmp/cache-affinity-candidate-policy.log
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute AArch64 cache selector tests
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu \
+            aarch64::cache::tests::test_common_cache_topology -- --nocapture \
+            2>&1 | tee /tmp/cache-affinity-arch-tests.log
+          grep -F 'test aarch64::cache::tests::test_common_cache_topology_preserves_matching_cpu_roots ... ok' /tmp/cache-affinity-arch-tests.log
+          grep -F 'test aarch64::cache::tests::test_common_cache_topology_omits_different_cpu_roots ... ok' /tmp/cache-affinity-arch-tests.log
+      - name: Execute AArch64 affinity selector tests
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p vmm --features kvm --target aarch64-unknown-linux-gnu \
+            cache_affinity_tests -- --nocapture 2>&1 | tee /tmp/cache-affinity-vmm-tests.log
+          grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_uses_fully_pinned_execution_set ... ok' /tmp/cache-affinity-vmm-tests.log
+          grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_adds_default_set_for_unpinned_vcpu ... ok' /tmp/cache-affinity-vmm-tests.log
+          grep -F 'test cpu::cache_affinity_tests::test_host_cpus_from_affinity_words_supports_high_cpu_ids ... ok' /tmp/cache-affinity-vmm-tests.log
+          grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_includes_hotpluggable_vcpus ... ok' /tmp/cache-affinity-vmm-tests.log
+      - name: Full AArch64 cache regression
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests
+      - name: Focused AArch64 Clippy
+        run: |
+          cargo clippy -p arch --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+          cargo clippy -p vmm --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: AArch64 KVM vmm compile
+        run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+      - name: AArch64 MSHV vmm compile
+        run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+      - name: x86_64 KVM regression compile
+        run: cargo check -p vmm --features kvm
+      - name: Verify exact refreshed candidate convergence
+        run: |
+          git diff --binary --full-index HEAD -- \
+            arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs \
+            vmm/src/cpu.rs vmm/src/vm.rs vmm/src/vm_config.rs \
+            > /tmp/cache-affinity-candidate.patch
+          echo 'aec77fdcb31df5667bfbea0c688e00ea07a9750f5cdd1c9cdc9b1d67404939a0  linux-fieldwork/cache-affinity/candidate.patch' | sha256sum -c -
+          echo 'aec77fdcb31df5667bfbea0c688e00ea07a9750f5cdd1c9cdc9b1d67404939a0  /tmp/cache-affinity-candidate.patch' | sha256sum -c -
+          cmp linux-fieldwork/cache-affinity/candidate.patch /tmp/cache-affinity-candidate.patch
+          git patch-id --stable < linux-fieldwork/cache-affinity/candidate.patch | awk '{print $1}' > /tmp/stored-patch-id.txt
+          git patch-id --stable < /tmp/cache-affinity-candidate.patch | awk '{print $1}' > /tmp/generated-patch-id.txt
+          cmp /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt
+          sha256sum linux-fieldwork/cache-affinity/candidate.patch /tmp/cache-affinity-candidate.patch | tee /tmp/candidate-sha256.txt
+          cat /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt | tee /tmp/candidate-patch-ids.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-cache-affinity-candidate-v3
+          path: |
+            /tmp/changed-files.txt
+            /tmp/cache-affinity-candidate-policy.log
+            /tmp/cache-affinity-arch-tests.log
+            /tmp/cache-affinity-vmm-tests.log
+            /tmp/cache-affinity-candidate.patch
+            /tmp/candidate-sha256.txt
+            /tmp/candidate-patch-ids.txt
+          if-no-files-found: warn

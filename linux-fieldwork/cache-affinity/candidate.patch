@@ -1,0 +1,440 @@
+diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
+index 06a290e1b427e0f8f365de326d942c7a3d6f0364..570e4fd0b561961899fa2914f7d518a35cd13b57 100644
+--- a/arch/src/aarch64/cache.rs
++++ b/arch/src/aarch64/cache.rs
+@@ -14,6 +14,7 @@ use log::warn;
+ use thiserror::Error;
+ 
+ const CACHE_SYSFS_PATH: &str = "/sys/devices/system/cpu/cpu0/cache";
++const CPU_SYSFS_PATH: &str = "/sys/devices/system/cpu";
+ 
+ #[derive(Debug, Error)]
+ pub enum Error {
+@@ -361,7 +362,7 @@ pub fn get_cache_shared(cache_level: CacheLevel) -> Result<bool> {
+     get_cache_shared_from_index(cache_path, index)
+ }
+ 
+-#[derive(Default, Copy, Clone, Debug)]
++#[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
+ pub struct CacheTopologyInfo {
+     pub l1_d_cache_size: u32,
+     pub l1_d_cache_line_size: u32,
+@@ -452,6 +453,41 @@ pub fn read_cache_topology() -> Result<Option<CacheTopologyInfo>> {
+     read_cache_topology_from(Path::new(CACHE_SYSFS_PATH))
+ }
+ 
++fn read_common_cache_topology_from(
++    cpu_sysfs_path: &Path,
++    host_cpus: &[usize],
++) -> Result<Option<CacheTopologyInfo>> {
++    let mut common = None;
++
++    for host_cpu in host_cpus {
++        let cache_path = cpu_sysfs_path.join(format!("cpu{host_cpu}/cache"));
++        let Some(current) = read_cache_topology_from(&cache_path)? else {
++            warn!(
++                "Cache topology is unavailable for eligible host CPU {host_cpu}; omitting guest cache information."
++            );
++            return Ok(None);
++        };
++
++        match common {
++            None => common = Some(current),
++            Some(expected) if expected == current => {}
++            Some(_) => {
++                warn!(
++                    "Cache topology differs across eligible host CPUs; omitting guest cache information."
++                );
++                return Ok(None);
++            }
++        }
++    }
++
++    Ok(common)
++}
++
++/// Reads one common representable cache topology for the eligible host CPUs.
++pub fn read_common_cache_topology(host_cpus: &[usize]) -> Result<Option<CacheTopologyInfo>> {
++    read_common_cache_topology_from(Path::new(CPU_SYSFS_PATH), host_cpus)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::sync::atomic::{AtomicUsize, Ordering};
+@@ -758,4 +794,60 @@ mod tests {
+             Err(Error::CacheSizeOverflow { .. })
+         ));
+     }
++
++    #[test]
++    fn test_common_cache_topology_preserves_matching_cpu_roots() {
++        let temp = TestDir::new();
++        for cpu in [0, 4] {
++            let cache_path = temp.path().join(format!("cpu{cpu}/cache"));
++            fs::create_dir_all(&cache_path).unwrap();
++            write_identity(&cache_path, 0, 1, "Data");
++            write_property(&cache_path, 0, "size", "64K");
++            write_identity(&cache_path, 1, 1, "Instruction");
++            write_property(&cache_path, 1, "size", "64K");
++            write_identity(&cache_path, 2, 2, "Unified");
++            write_property(&cache_path, 2, "size", "1024K");
++            write_identity(&cache_path, 3, 3, "Unified");
++            write_property(&cache_path, 3, "size", "4096K");
++        }
++
++        let info = read_common_cache_topology_from(temp.path(), &[0, 4])
++            .unwrap()
++            .unwrap();
++        assert_eq!(info.l1_d_cache_size, 64 * 1024);
++        assert_eq!(info.l2_cache_size, 1024 * 1024);
++    }
++
++    #[test]
++    fn test_common_cache_topology_omits_different_cpu_roots() {
++        let temp = TestDir::new();
++        let cpu0_cache = temp.path().join("cpu0/cache");
++        let cpu4_cache = temp.path().join("cpu4/cache");
++        fs::create_dir_all(&cpu0_cache).unwrap();
++        fs::create_dir_all(&cpu4_cache).unwrap();
++
++        write_identity(&cpu0_cache, 0, 1, "Data");
++        write_property(&cpu0_cache, 0, "size", "32K");
++        write_identity(&cpu0_cache, 1, 1, "Instruction");
++        write_property(&cpu0_cache, 1, "size", "32K");
++        write_identity(&cpu0_cache, 2, 2, "Unified");
++        write_property(&cpu0_cache, 2, "size", "256K");
++        write_identity(&cpu0_cache, 3, 3, "Unified");
++        write_property(&cpu0_cache, 3, "size", "4096K");
++
++        write_identity(&cpu4_cache, 0, 1, "Data");
++        write_property(&cpu4_cache, 0, "size", "64K");
++        write_identity(&cpu4_cache, 1, 1, "Instruction");
++        write_property(&cpu4_cache, 1, "size", "64K");
++        write_identity(&cpu4_cache, 2, 2, "Unified");
++        write_property(&cpu4_cache, 2, "size", "1024K");
++        write_identity(&cpu4_cache, 3, 3, "Unified");
++        write_property(&cpu4_cache, 3, "size", "4096K");
++
++        assert!(
++            read_common_cache_topology_from(temp.path(), &[0, 4])
++                .unwrap()
++                .is_none()
++        );
++    }
+ }
+diff --git a/arch/src/aarch64/fdt.rs b/arch/src/aarch64/fdt.rs
+index 8b6b4bd67d264199b7962c57e25f7b25b594a770..047c77ff6617161b2bf1c4f9532a32a3e9ea89d4 100644
+--- a/arch/src/aarch64/fdt.rs
++++ b/arch/src/aarch64/fdt.rs
+@@ -26,7 +26,7 @@ use vm_fdt::{FdtWriter, FdtWriterResult};
+ use vm_memory::{Address, Bytes, GuestMemoryBackend, GuestMemoryError, GuestMemoryRegion};
+ 
+ use super::super::{DeviceType, GuestMemoryMmap, InitramfsConfig};
+-use super::cache::{CacheTopologyInfo, read_cache_topology};
++use super::cache::{CacheTopologyInfo, read_common_cache_topology};
+ use super::layout::{
+     GIC_V2M_COMPATIBLE, GICV2M_SPI_BASE, GICV2M_SPI_NUM, IRQ_BASE, MEM_32BIT_DEVICES_SIZE,
+     MEM_32BIT_DEVICES_START, MEM_PCI_IO_SIZE, MEM_PCI_IO_START, PCI_HIGH_BASE,
+@@ -105,6 +105,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
+     cmdline: &str,
+     vcpu_mpidr: &[u64],
+     vcpu_topology: Option<(u16, u16, u16, u16)>,
++    cache_host_cpus: &[usize],
+     device_info: &HashMap<(DeviceType, String), T, S>,
+     gic_device: &Arc<Mutex<dyn Vgic>>,
+     initrd: &Option<InitramfsConfig>,
+@@ -130,7 +131,13 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
+     // This is not mandatory but we use it to point the root node to the node
+     // containing description of the interrupt controller for this VM.
+     fdt.property_u32("interrupt-parent", GIC_PHANDLE)?;
+-    create_cpu_nodes(&mut fdt, vcpu_mpidr, vcpu_topology, numa_nodes)?;
++    create_cpu_nodes(
++        &mut fdt,
++        vcpu_mpidr,
++        vcpu_topology,
++        cache_host_cpus,
++        numa_nodes,
++    )?;
+     create_memory_node(&mut fdt, guest_mem, numa_nodes)?;
+     create_chosen_node(&mut fdt, cmdline, initrd)?;
+     create_gic_node(&mut fdt, gic_device)?;
+@@ -167,6 +174,7 @@ fn create_cpu_nodes(
+     fdt: &mut FdtWriter,
+     vcpu_mpidr: &[u64],
+     vcpu_topology: Option<(u16, u16, u16, u16)>,
++    cache_host_cpus: &[usize],
+     numa_nodes: &NumaNodes,
+ ) -> Result<()> {
+     // See https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/arm/cpus.yaml.
+@@ -182,7 +190,7 @@ fn create_cpu_nodes(
+         threads_per_core as u32 * cores_per_die as u32 * dies_per_package as u32 * packages as u32;
+ 
+     // Add cache info.
+-    let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;
++    let cache_info = read_common_cache_topology(cache_host_cpus).map_err(Error::CacheTopology)?;
+     let cache_exist = cache_info.is_some();
+     let CacheTopologyInfo {
+         l1_d_cache_size,
+diff --git a/arch/src/aarch64/mod.rs b/arch/src/aarch64/mod.rs
+index f70d75e77063a7ac8fffeefc8d720e051bcafc0b..bca4f691d9781ce485ef17d68fb09b4a0256db3e 100644
+--- a/arch/src/aarch64/mod.rs
++++ b/arch/src/aarch64/mod.rs
+@@ -130,6 +130,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
+     cmdline: &str,
+     vcpu_mpidr: &[u64],
+     vcpu_topology: Option<(u16, u16, u16, u16)>,
++    cache_host_cpus: &[usize],
+     device_info: &HashMap<(DeviceType, String), T, S>,
+     initrd: &Option<super::InitramfsConfig>,
+     pci_space_info: &[PciSpaceInfo],
+@@ -143,6 +144,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
+         cmdline,
+         vcpu_mpidr,
+         vcpu_topology,
++        cache_host_cpus,
+         device_info,
+         gic_device,
+         initrd,
+diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
+index 61902e1953bef1457f081802e7aaf5c2b8ecf917..6c9dc308e01c7e73a41da17aed253cdf2f45dd3b 100644
+--- a/vmm/src/cpu.rs
++++ b/vmm/src/cpu.rs
+@@ -12,9 +12,11 @@
+ //
+ 
+ use std::collections::BTreeMap;
++#[cfg(target_arch = "aarch64")]
++use std::collections::BTreeSet;
+ #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
+ use std::io::Write;
+-use std::mem::zeroed;
++use std::mem::{self, zeroed};
+ use std::os::unix::thread::JoinHandleExt;
+ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+ use std::sync::{Arc, Barrier, Mutex};
+@@ -26,7 +28,7 @@ use acpi_tables::sdt::Sdt;
+ use acpi_tables::{Aml, aml};
+ use anyhow::anyhow;
+ #[cfg(target_arch = "aarch64")]
+-use arch::aarch64::cache::{CacheTopologyInfo, read_cache_topology};
++use arch::aarch64::cache::{CacheTopologyInfo, read_common_cache_topology};
+ use arch::{EntryPoint, NumaNodes, layout};
+ #[cfg(target_arch = "aarch64")]
+ use devices::gic::Gic;
+@@ -168,6 +170,10 @@ pub enum Error {
+     #[error("Failed to read cache topology")]
+     CacheTopology(#[source] arch::aarch64::cache::Error),
+ 
++    #[cfg(target_arch = "aarch64")]
++    #[error("Failed to read host CPU affinity")]
++    HostCpuAffinity(#[source] io::Error),
++
+     #[error("Failed to join on vCPU threads: {0:?}")]
+     ThreadCleanup(Box<dyn any::Any + Send>),
+ 
+@@ -710,6 +716,65 @@ impl Snapshottable for Vcpu {
+     }
+ }
+ 
++#[cfg(target_arch = "aarch64")]
++fn host_cpus_from_affinity_words(words: &[usize]) -> Vec<usize> {
++    let word_bits = usize::BITS as usize;
++    let mut host_cpus = Vec::new();
++
++    for (word_index, word) in words.iter().enumerate() {
++        for bit in 0..word_bits {
++            if word & (1usize << bit) != 0 {
++                host_cpus.push(word_index * word_bits + bit);
++            }
++        }
++    }
++
++    host_cpus
++}
++
++#[cfg(target_arch = "aarch64")]
++fn process_host_cpus() -> Result<Vec<usize>> {
++    let word_size = mem::size_of::<usize>();
++    let initial_words = mem::size_of::<libc::cpu_set_t>().div_ceil(word_size);
++    let mut words = vec![0usize; initial_words];
++
++    loop {
++        let cpusetsize = words.len() * word_size;
++        // SAFETY: `words` is writable for `cpusetsize` bytes. The kernel treats
++        // this argument as an opaque CPU mask and does not dereference it as a
++        // Rust `cpu_set_t`.
++        let ret = unsafe {
++            libc::sched_getaffinity(0, cpusetsize, words.as_mut_ptr().cast::<libc::cpu_set_t>())
++        };
++        if ret == 0 {
++            return Ok(host_cpus_from_affinity_words(&words));
++        }
++
++        let source = io::Error::last_os_error();
++        if source.raw_os_error() != Some(libc::EINVAL) {
++            return Err(Error::HostCpuAffinity(source));
++        }
++        words.resize(words.len() * 2, 0);
++    }
++}
++
++#[cfg(target_arch = "aarch64")]
++fn cache_host_cpus_from_affinity(
++    vcpu_count: u32,
++    affinity: &BTreeMap<u32, Box<[usize]>>,
++    default_host_cpus: &[usize],
++) -> Vec<usize> {
++    let mut host_cpus = BTreeSet::new();
++    for vcpu_id in 0..vcpu_count {
++        if let Some(vcpu_host_cpus) = affinity.get(&vcpu_id) {
++            host_cpus.extend(vcpu_host_cpus.iter().copied());
++        } else {
++            host_cpus.extend(default_host_cpus.iter().copied());
++        }
++    }
++    host_cpus.into_iter().collect()
++}
++
+ pub struct CpuManager {
+     config: CpusConfig,
+     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+@@ -1966,6 +2031,23 @@ impl CpuManager {
+         madt
+     }
+ 
++    #[cfg(target_arch = "aarch64")]
++    pub fn cache_host_cpus(&self) -> Result<Vec<usize>> {
++        let needs_default =
++            (0..self.config.max_vcpus).any(|vcpu_id| !self.affinity.contains_key(&vcpu_id));
++        let default_host_cpus = if needs_default {
++            process_host_cpus()?
++        } else {
++            Vec::new()
++        };
++
++        Ok(cache_host_cpus_from_affinity(
++            self.config.max_vcpus,
++            &self.affinity,
++            &default_host_cpus,
++        ))
++    }
++
+     #[cfg(target_arch = "aarch64")]
+     pub fn create_pptt(&self) -> Result<PPTT> {
+         let mut cpus = 0;
+@@ -1979,7 +2061,9 @@ impl CpuManager {
+         let cores_per_package = cores_per_die * dies_per_package;
+ 
+         // Add cache info.
+-        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;
++        let cache_host_cpus = self.cache_host_cpus()?;
++        let cache_info =
++            read_common_cache_topology(&cache_host_cpus).map_err(Error::CacheTopology)?;
+         let CacheTopologyInfo {
+             l1_d_cache_size,
+             l1_d_cache_line_size,
+@@ -3726,3 +3810,54 @@ mod unit_tests {
+         vcpu.set_mp_state(state).unwrap();
+     }
+ }
++
++#[cfg(all(test, target_arch = "aarch64"))]
++mod cache_affinity_tests {
++    use super::*;
++
++    #[test]
++    fn test_cache_host_cpus_uses_fully_pinned_execution_set() {
++        let affinity = BTreeMap::from([
++            (0, vec![4, 5].into_boxed_slice()),
++            (1, vec![5, 6].into_boxed_slice()),
++        ]);
++        assert_eq!(
++            cache_host_cpus_from_affinity(2, &affinity, &[0, 1, 2, 3]),
++            vec![4, 5, 6]
++        );
++    }
++
++    #[test]
++    fn test_cache_host_cpus_adds_default_set_for_unpinned_vcpu() {
++        let affinity = BTreeMap::from([(0, vec![4, 5].into_boxed_slice())]);
++        assert_eq!(
++            cache_host_cpus_from_affinity(2, &affinity, &[0, 1, 2, 3]),
++            vec![0, 1, 2, 3, 4, 5]
++        );
++    }
++
++    #[test]
++    fn test_host_cpus_from_affinity_words_supports_high_cpu_ids() {
++        let high_cpu = 1300usize;
++        let word_bits = usize::BITS as usize;
++        let mut words = vec![0usize; high_cpu / word_bits + 1];
++        words[high_cpu / word_bits] |= 1usize << (high_cpu % word_bits);
++
++        assert_eq!(host_cpus_from_affinity_words(&words), vec![high_cpu]);
++    }
++
++    #[test]
++    fn test_cache_host_cpus_includes_hotpluggable_vcpus() {
++        let affinity = BTreeMap::from([
++            (0, vec![4].into_boxed_slice()),
++            (1, vec![4].into_boxed_slice()),
++            (2, vec![6].into_boxed_slice()),
++            (3, vec![6].into_boxed_slice()),
++        ]);
++
++        assert_eq!(
++            cache_host_cpus_from_affinity(4, &affinity, &[0, 1, 2, 3]),
++            vec![4, 6]
++        );
++    }
++}
+diff --git a/vmm/src/vm.rs b/vmm/src/vm.rs
+index 454e0ab11224b98112812aad7f872c20b2f418c6..b06b90c4615005eef0143be7a4cdb19d86e766d9 100644
+--- a/vmm/src/vm.rs
++++ b/vmm/src/vm.rs
+@@ -1859,8 +1859,14 @@ impl Vm {
+             self.config.lock().unwrap().payload.as_ref().unwrap(),
+             &self.device_manager,
+         )?;
+-        let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
+-        let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
++        let (vcpu_mpidrs, vcpu_topology, cache_host_cpus) = {
++            let cpu_manager = self.cpu_manager.lock().unwrap();
++            (
++                cpu_manager.get_mpidrs(),
++                cpu_manager.get_vcpu_topology(),
++                cpu_manager.cache_host_cpus().map_err(Error::CpuManager)?,
++            )
++        };
+         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
+         let mut pci_space_info: Vec<PciSpaceInfo> = Vec::new();
+         let initramfs_config = match self.initramfs {
+@@ -1927,6 +1933,7 @@ impl Vm {
+             cmdline.as_cstring().unwrap().to_str().unwrap(),
+             &vcpu_mpidrs,
+             vcpu_topology,
++            &cache_host_cpus,
+             device_info,
+             &initramfs_config,
+             &pci_space_info,
+@@ -4022,6 +4029,7 @@ mod unit_tests {
+             "console=tty0",
+             &[0],
+             None,
++            &[0],
+             &dev_info,
+             &gic,
+             &None,
+diff --git a/vmm/src/vm_config.rs b/vmm/src/vm_config.rs
+index 3cea9e18ab630517d98206fa4eb70ce16359166d..1b46515e2c66a60ebc1aa6b160e1659f924d18e6 100644
+--- a/vmm/src/vm_config.rs
++++ b/vmm/src/vm_config.rs
+@@ -1216,7 +1216,7 @@ impl VmConfig {
+ 
+         #[cfg(target_arch = "aarch64")]
+         {
+-            landlock.add_rule_with_access(Path::new("/sys/devices/system/cpu/cpu0/cache"), "r")?;
++            landlock.add_rule_with_access(Path::new("/sys/devices/system/cpu"), "r")?;
+         }
+ 
+         if let Some(mem_zones) = &self.memory.zones {

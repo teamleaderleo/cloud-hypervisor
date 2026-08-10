@@ -1,0 +1,70 @@
+diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
+--- a/vmm/src/cpu.rs
++++ b/vmm/src/cpu.rs
+@@ -1,25 +1,45 @@
++#[cfg(target_arch = "aarch64")]
++fn host_cpus_from_affinity_words(words: &[usize]) -> Vec<usize> {
++    let word_bits = usize::BITS as usize;
++    let mut host_cpus = Vec::new();
++
++    for (word_index, word) in words.iter().enumerate() {
++        for bit in 0..word_bits {
++            if word & (1usize << bit) != 0 {
++                host_cpus.push(word_index * word_bits + bit);
++            }
++        }
++    }
++
++    host_cpus
++}
++
+ #[cfg(target_arch = "aarch64")]
+ fn process_host_cpus() -> Result<Vec<usize>> {
+-    // SAFETY: all zeros is a valid cpu_set_t bit pattern.
+-    let mut cpuset: libc::cpu_set_t = unsafe { zeroed() };
+-    // SAFETY: cpuset points to writable storage of the advertised size.
+-    let ret = unsafe {
+-        libc::sched_getaffinity(
+-            0,
+-            mem::size_of::<libc::cpu_set_t>(),
+-            &mut cpuset,
+-        )
+-    };
+-    if ret != 0 {
+-        return Err(Error::HostCpuAffinity(io::Error::last_os_error()));
++    let word_size = mem::size_of::<usize>();
++    let initial_words = mem::size_of::<libc::cpu_set_t>().div_ceil(word_size);
++    let mut words = vec![0usize; initial_words];
++
++    loop {
++        let cpusetsize = words.len() * word_size;
++        // SAFETY: `words` is writable for `cpusetsize` bytes. The kernel treats
++        // this argument as an opaque CPU mask and does not dereference it as a
++        // Rust `cpu_set_t`.
++        let ret = unsafe {
++            libc::sched_getaffinity(
++                0,
++                cpusetsize,
++                words.as_mut_ptr().cast::<libc::cpu_set_t>(),
++            )
++        };
++        if ret == 0 {
++            return Ok(host_cpus_from_affinity_words(&words));
++        }
++
++        let source = io::Error::last_os_error();
++        if source.raw_os_error() != Some(libc::EINVAL) {
++            return Err(Error::HostCpuAffinity(source));
++        }
++        words.resize(words.len() * 2, 0);
+     }
+-
+-    let mut host_cpus = Vec::new();
+-    for host_cpu in 0..libc::CPU_SETSIZE as usize {
+-        // SAFETY: host_cpu is bounded by CPU_SETSIZE and cpuset is initialized.
+-        if unsafe { libc::CPU_ISSET(host_cpu, &cpuset) } {
+-            host_cpus.push(host_cpu);
+-        }
+-    }
+-    Ok(host_cpus)
+ }

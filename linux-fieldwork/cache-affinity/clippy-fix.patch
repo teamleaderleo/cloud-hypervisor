@@ -1,0 +1,15 @@
+diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
+--- a/vmm/src/cpu.rs
++++ b/vmm/src/cpu.rs
+@@ -16,3 +16,3 @@
+ use std::io::Write;
+-use std::mem::zeroed;
++use std::mem::{self, zeroed};
+ use std::os::unix::thread::JoinHandleExt;
+@@ -726,5 +726,5 @@ fn process_host_cpus() -> Result<Vec<usize>> {
+         libc::sched_getaffinity(
+             0,
+-            std::mem::size_of::<libc::cpu_set_t>(),
++            mem::size_of::<libc::cpu_set_t>(),
+             &mut cpuset,
+         )

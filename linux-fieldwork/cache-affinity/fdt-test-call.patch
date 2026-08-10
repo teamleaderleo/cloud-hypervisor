@@ -1,0 +1,11 @@
+diff --git a/vmm/src/vm.rs b/vmm/src/vm.rs
+--- a/vmm/src/vm.rs
++++ b/vmm/src/vm.rs
+@@ -4030,6 +4030,7 @@ fn test_create_fdt_with_devices() {
+             "console=tty0",
+             &[0],
+             None,
++            &[0],
+             &dev_info,
+             &gic,
+             &None,
