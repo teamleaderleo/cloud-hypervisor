@@ -1,72 +1,71 @@
 # Linux Fieldwork handoff — AArch64 cache topology vs vCPU affinity
 
 Updated: 2026-08-10
-State: ACTIVE BASELINE PROBE
+State: STRONG / FROZEN INTERNAL CANDIDATE
 Canonical source: `a1fcb9f790616ac615f66de73be540b0b20844b1`
 Branch: `linux-fieldwork/cache-affinity-selection`
 Internal record: `teamleaderleo/linux-fieldwork#543`
+Carrier: `teamleaderleo/cloud-hypervisor#9`
 Prerequisites: exact validated #8666, #8097, #541, and #542 candidates
+External contact: false; none occurred
 
-## TL;DR
+## Reproduced defect
 
-Cloud Hypervisor reads AArch64 cache topology only from host CPU0, then publishes that one topology to every guest CPU in both FDT and PPTT. CpuManager independently supports arbitrary per-vCPU host CPU affinity, and by default vCPUs can run across the host CPU set.
+Cloud Hypervisor's AArch64 cache discovery is sourced from host CPU0 while CpuManager can schedule vCPUs on arbitrary host CPU sets. The baseline proved a legal execution set can exclude CPU0 and contain a different representable private-cache geometry while FDT/PPTT still publish CPU0's cache values.
 
-On a heterogeneous Arm host, a legal affinity configuration can exclude CPU0 entirely while eligible host CPUs have different private cache geometry. The first carrier is test-only: prove two valid representable per-CPU cache roots can differ, then guard the exact current source paths showing cache publication still selects CPU0 while runtime affinity selects another CPU set.
+Baseline run/job: `31355717202` / `93354884981` — success
+Baseline artifact: `9050559168`
+Baseline artifact digest: `sha256:adb493d8311ddcededdcf5a74eee9550cce749e7664078f8c1370b8f4ddef2ae`
 
-## Supported-host evidence
+## Frozen candidate
 
-Arm DynamIQ supports heterogeneous Cortex-A75 + Cortex-A55 combinations in one cluster with thread migration between core types. Cortex-A55 private L2 is configurable from 64KB to 256KB; Cortex-A75 also has configurable private L2. GIC-600 supports DynamIQ Armv8 cores with GICv3.
+The candidate changes exactly five product files:
 
-Cloud Hypervisor documents AArch64 servers or development boards with GICv3 as its AArch64 prerequisite. Its CPU documentation says vCPU affinity can select arbitrary host CPU sets and that, by default, a vCPU runs on the entire host CPU set.
+- `arch/src/aarch64/cache.rs`
+- `arch/src/aarch64/fdt.rs`
+- `arch/src/aarch64/mod.rs`
+- `vmm/src/cpu.rs`
+- `vmm/src/vm.rs`
 
-## Exact current source
+Policy:
 
-Cache reader:
+1. CpuManager derives the eligible host CPUs for all configured `max_vcpus`, covering future CPU hotplug.
+2. Explicitly pinned vCPUs contribute their configured host CPU sets.
+3. Any vCPU without explicit affinity contributes the process scheduler affinity read through `sched_getaffinity()`.
+4. The affinity mask grows dynamically on `EINVAL`, covering CPU IDs beyond libc `CPU_SETSIZE`.
+5. Eligible CPUs are unioned/deduplicated.
+6. Each eligible `cpuN/cache` root is parsed with the validated #8097/#541 identity-aware cache reader.
+7. Cache passthrough proceeds only when all eligible CPUs have one equal representable `CacheTopologyInfo`; otherwise the existing cache-less path is used.
+8. FDT and PPTT consume the same eligible CPU set/common topology.
+9. #542's shared-L2 omission policy remains intact.
 
-```text
-/sys/devices/system/cpu/cpu0/cache
-```
+The candidate preserves cache publication for a homogeneous pinned execution set and avoids copying CPU0 onto heterogeneous or CPU0-excluding execution sets.
 
-is the single production source used by `read_cache_topology()`.
+## Exact bytes
 
-CpuManager owns:
+Stored patch: `linux-fieldwork/cache-affinity/candidate.patch`
+Git blob: `57542277a76d84ed4bfca58aab871ef27f090beb`
+SHA-256: `8d5338bfa915420f981802929dea8bf6aad11da77c75f7c602cd73e5aca6b19c`
+Product diff: 5 files, 242 additions / 9 deletions.
 
-```text
-affinity: BTreeMap<u32, Box<[usize]>>
-```
+## Validation receipts
 
-and converts the selected host CPUs into the actual `sched_setaffinity()` cpuset for each vCPU thread.
+First fully-green refined matrix:
 
-FDT calls `read_cache_topology()` once and applies the result across its CPU nodes. PPTT also calls `read_cache_topology()` once and uses the result across its processor hierarchy.
+- run/job: `31357210873` / `93359031429`
+- artifact: `9051103464`
+- artifact digest: `sha256:2bb96b20453fd0d4a8252fc268c5998cde9a5405fcd0bade18efbdc630afb758`
 
-## Baseline discriminator
+Final exact-byte convergence:
 
-After exact #8666 -> #8097 -> #541 -> #542 application:
+- run/job: `31359443184` / `93365235611`
+- artifact: `9051848655`
+- artifact digest: `sha256:eaaad0e37691f6ba54df32c5505802f2581c03b6b9b2728e872527f522cfe709`
 
-1. create synthetic `cpu0/cache` and `cpu4/cache` roots with the same representable split-L1/unified-L2/L3 identity but different private L1/L2 sizes;
-2. execute both roots through the exact cache parser and prove both are valid yet different;
-3. use a legal affinity example `{vcpu0: [4,5], vcpu1: [4,5]}` whose execution set excludes CPU0;
-4. guard exact production source showing cache selection remains CPU0-only for both FDT and PPTT;
-5. retain only the test diff and policy logs.
+The final read-only run verified exact prerequisite/source blobs, applied only the stored candidate, passed common-topology tests, pinned/mixed affinity tests, host CPU ID 1300, future hotplug eligibility, all AArch64 cache regressions, nightly formatting, Clippy, AArch64 KVM/MSHV, and x86_64 KVM. It regenerated the five-file product diff and passed literal stored/generated `cmp` plus both SHA-256 checks.
 
-A green baseline proves the product can publish cache geometry from a host CPU outside the vCPU execution set. It is not a product fix.
+## Reopen conditions
 
-## Candidate direction if reproduced
+Reopen if relevant canonical bytes move materially, a supported-host counterexample invalidates the common-topology policy, or a competing affinity-aware cache representation appears upstream.
 
-Compute one common representable topology from the host CPUs the guest can actually execute on.
-
-Safe policy:
-
-- if every relevant eligible host CPU has the same representable topology, publish that common topology;
-- if eligible CPUs disagree, omit cache passthrough;
-- for any vCPU without explicit affinity, treat the full online host CPU set as eligible;
-- use the same selected topology for FDT and PPTT;
-- keep #541's identity recognizer and #542's shared-L2 policy intact.
-
-This is preferable to checking all host CPUs unconditionally because an explicitly pinned VM may use a homogeneous subset of a heterogeneous host.
-
-A richer per-vCPU/per-cluster guest cache model remains a larger future design.
-
-## External-contact state
-
-`false; none occurred`.
+A richer per-vCPU/per-cluster guest cache model remains outside this lane.
