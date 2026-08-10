@@ -25,7 +25,7 @@ index 57387c4db..d4d47de74 100644
          if self.cpus.max_vcpus > MAX_SUPPORTED_CPUS {
              // Note: historically, Cloud Hypervisor did not support more than 255(254 on x64)
              // vCPUs: self.cpus.max_vcpus was of type u8, so 255 was the maximum;
-@@ -5958,6 +5967,34 @@ id="{id}",pci_segment={pci_segment},queue_sizes={queue_sizes}"
+@@ -5958,6 +5967,34 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
          });
          still_valid_config.validate().unwrap();
  
