@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   candidate:
@@ -65,7 +65,25 @@ jobs:
       - name: Retain generated candidate diff
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
+          echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  /tmp/cache-index-candidate.patch' | sha256sum -c -
           sha256sum /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
+      - name: Freeze exact candidate bytes on carrier branch
+        if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
+        env:
+          BRANCH: linux-fieldwork/cache-index-portability
+        run: |
+          git fetch origin "$BRANCH"
+          git reset --hard "origin/$BRANCH"
+          cp /tmp/cache-index-candidate.patch linux-fieldwork/cache-index/candidate.patch
+          git diff --check -- linux-fieldwork/cache-index/candidate.patch
+          git add linux-fieldwork/cache-index/candidate.patch
+          if git diff --cached --quiet; then
+            echo 'candidate already frozen'
+            exit 0
+          fi
+          git -c user.name='Linux Fieldwork CI' -c user.email='linux-fieldwork@example.invalid' \
+            commit -m 'linux-fieldwork: freeze identity-aware cache candidate'
+          git push origin "HEAD:$BRANCH"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
