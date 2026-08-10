@@ -77,6 +77,7 @@ for patch_name in [
     "format-fix.patch",
     "clippy-fix.patch",
     "propagation.patch",
+    "propagation-clippy-fix.patch",
     "fdt-propagation.patch",
 ]:
     patch_path = candidate_dir / patch_name
