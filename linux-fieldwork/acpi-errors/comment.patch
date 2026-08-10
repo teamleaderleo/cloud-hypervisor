@@ -1,0 +1,11 @@
+diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
+--- a/vmm/src/acpi.rs
++++ b/vmm/src/acpi.rs
+@@ -218,6 +218,7 @@ bitflags! {
+     }
+ }
+ 
++// ACPI requires these SRAT structures to have fixed byte sizes.
+ const _: () = assert!(size_of::<MemoryAffinity>() == 40);
+ const _: () = assert!(size_of::<GenericInitiatorAffinity>() == 32);
+ 
