@@ -28,15 +28,15 @@ index 6ac7666..47ea01c 100644
  use crate::{GuestMemoryMmap, GuestRegionMmap};
  
 +#[derive(Debug, Error)]
-+pub enum AcpiError {
++pub enum Error {
 +    #[error("ACPI table address overflow")]
 +    AddressOverflow,
 +
 +    #[error("fw_cfg is missing while ACPI table delivery is enabled")]
 +    MissingFwCfg,
 +
-+    #[error("ACPI resource mutex is poisoned")]
-+    PoisonedLock,
++    #[error("ACPI {0} mutex is poisoned")]
++    PoisonedLock(&'static str),
 +
 +    #[error("failed to write ACPI data to guest memory")]
 +    GuestMemory(#[source] vm_memory::GuestMemoryError),
@@ -45,16 +45,16 @@ index 6ac7666..47ea01c 100644
 +    FwCfg(#[source] io::Error),
 +}
 +
-+pub type Result<T> = std::result::Result<T, AcpiError>;
++pub type Result<T> = std::result::Result<T, Error>;
 +
-+fn poisoned_lock<T>(_: PoisonError<T>) -> AcpiError {
-+    AcpiError::PoisonedLock
++fn poisoned_lock<T>(_: PoisonError<T>, resource: &'static str) -> Error {
++    Error::PoisonedLock(resource)
 +}
 +
 +fn next_table_address(address: GuestAddress, length: u64) -> Result<GuestAddress> {
 +    address
 +        .checked_add(length)
-+        .ok_or(AcpiError::AddressOverflow)
++        .ok_or(Error::AddressOverflow)
 +}
 +
  /* Values for Type in APIC sub-headers */
@@ -84,7 +84,7 @@ index 6ac7666..47ea01c 100644
          );
  
 -        let mut allocator = device_manager.allocator().lock().unwrap();
-+        let mut allocator = device_manager.allocator().lock().map_err(poisoned_lock)?;
++        let mut allocator = device_manager.allocator().lock().map_err(|e| poisoned_lock(e, "allocator"))?;
          for (port, len) in [(PM1A_EVT_PORT, 4u64), (PM1A_CNT_PORT, 2u64)] {
              if allocator
                  .allocate_io_addresses(Some(GuestAddress(port.into())), len, None)
@@ -134,7 +134,7 @@ index 6ac7666..47ea01c 100644
          .unwrap()
          .lock()
 -        .unwrap()
-+        .map_err(poisoned_lock)?
++        .map_err(|e| poisoned_lock(e, "interrupt controller"))?
          .get_vgic()
          .unwrap();
      let madt = cpu_manager.create_madt(
@@ -273,13 +273,13 @@ index 6ac7666..47ea01c 100644
      device_manager
          .fw_cfg()
 -        .expect("fw_cfg must be present")
-+        .ok_or(AcpiError::MissingFwCfg)?
++        .ok_or(Error::MissingFwCfg)?
          .lock()
 -        .unwrap()
-+        .map_err(poisoned_lock)?
++        .map_err(|e| poisoned_lock(e, "fw_cfg"))?
          .add_acpi(rsdp, table_bytes, checksums, pointer_offsets)
 -        .map_err(vm::Error::CreatingAcpiTables)
-+        .map_err(AcpiError::FwCfg)
++        .map_err(Error::FwCfg)
  }
  
  pub fn create_acpi_tables(
@@ -308,12 +308,12 @@ index 6ac7666..47ea01c 100644
      guest_mem
          .write_slice(rsdp.as_bytes(), rsdp_addr)
 -        .expect("Error writing RSDP");
-+        .map_err(AcpiError::GuestMemory)?;
++        .map_err(Error::GuestMemory)?;
  
      guest_mem
          .write_slice(tables_bytes.as_slice(), dsdt_addr)
 -        .expect("Error writing ACPI tables");
-+        .map_err(AcpiError::GuestMemory)?;
++        .map_err(Error::GuestMemory)?;
  
      info!(
          "Generated ACPI tables: took {}µs size = {}",
@@ -353,16 +353,14 @@ index 6ac7666..47ea01c 100644
  }
  
  #[cfg(test)]
-@@ -1232,6 +1261,14 @@ mod tests {
+@@ -1232,6 +1261,12 @@ mod tests {
  
      use super::*;
  
 +    #[test]
-+    fn test_next_table_address_overflow() {
-+        assert!(matches!(
-+            next_table_address(GuestAddress(u64::MAX), 1),
-+            Err(AcpiError::AddressOverflow)
-+        ));
++    fn test_next_table_address() {
++        assert_eq!(next_table_address(GuestAddress(0x1000), 0x20).unwrap(), GuestAddress(0x1020));
++        assert!(matches!(next_table_address(GuestAddress(u64::MAX), 1), Err(Error::AddressOverflow)));
 +    }
 +
      #[test]
@@ -380,7 +378,7 @@ index 12a9fe0..266cf4c 100644
 -    #[error("Error creating acpi tables")]
 -    CreatingAcpiTables(#[source] io::Error),
 +    #[error("Error creating ACPI tables")]
-+    CreatingAcpiTables(#[source] acpi::AcpiError),
++    CreatingAcpiTables(#[source] acpi::Error),
  
      #[cfg(feature = "fw_cfg")]
      #[error("Error adding fw_cfg item")]
