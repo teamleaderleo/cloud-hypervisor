@@ -1,5 +1,5 @@
 diff --git a/arch/src/aarch64/fdt.rs b/arch/src/aarch64/fdt.rs
-index 887d9ed..8b6b4bd 100644
+index 887d9edfe02056ab2567e4252fb6172236e1f770..8b6b4bd67d264199b7962c57e25f7b25b594a770 100644
 --- a/arch/src/aarch64/fdt.rs
 +++ b/arch/src/aarch64/fdt.rs
 @@ -84,6 +84,14 @@ pub trait DeviceInfoForFdt {
@@ -45,7 +45,7 @@ index 887d9ed..8b6b4bd 100644
      let CacheTopologyInfo {
          l1_d_cache_size,
 diff --git a/arch/src/aarch64/mod.rs b/arch/src/aarch64/mod.rs
-index c53e482..f70d75e 100644
+index c53e4829b48c2bcd294642f86e501a6b85dfe680..f70d75e77063a7ac8fffeefc8d720e051bcafc0b 100644
 --- a/arch/src/aarch64/mod.rs
 +++ b/arch/src/aarch64/mod.rs
 @@ -32,7 +32,7 @@ pub const _NSIG: i32 = 65;
@@ -67,10 +67,10 @@ index c53e482..f70d75e 100644
      if log_enabled!(Level::Debug) {
          fdt::print_fdt(&fdt_final);
 diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
-index 68fc175..b8a9bd5 100644
+index 882aad30f09384121c687f30f2aaaa04248669bf..2915307c6958ed61a60beff0a329ed5ff81bc908 100644
 --- a/vmm/src/acpi.rs
 +++ b/vmm/src/acpi.rs
-@@ -26,6 +26,8 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
+@@ -25,6 +25,8 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
  use zerocopy::{FromBytes, Immutable, IntoBytes};
  
  use crate::cpu::CpuManager;
@@ -79,7 +79,7 @@ index 68fc175..b8a9bd5 100644
  use crate::device_manager::DeviceManager;
  use crate::memory_manager::MemoryManager;
  use crate::pci_segment::PciSegment;
-@@ -36,6 +38,10 @@ pub enum Error {
+@@ -35,6 +37,10 @@ pub enum Error {
      #[error("ACPI table address overflow")]
      AddressOverflow,
  
@@ -90,7 +90,7 @@ index 68fc175..b8a9bd5 100644
      #[error("Missing fw_cfg device for ACPI tables")]
      MissingFwCfg,
  
-@@ -966,7 +972,9 @@ fn create_acpi_tables_internal(
+@@ -958,7 +964,9 @@ fn create_acpi_tables_internal(
      // PPTT
      #[cfg(target_arch = "aarch64")]
      {
@@ -102,7 +102,7 @@ index 68fc175..b8a9bd5 100644
          let mut pptt_bytes = Vec::new();
  
 diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
-index 5d94998..4918570 100644
+index 5d9499878b04f7c0fb53cece5768988ceb439d25..49185703658edd1727620f53476eb1a34dc593a9 100644
 --- a/vmm/src/cpu.rs
 +++ b/vmm/src/cpu.rs
 @@ -164,6 +164,10 @@ pub enum Error {
