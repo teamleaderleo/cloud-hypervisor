@@ -10,3 +10,7 @@ License: CC-BY-4.0
 Files: scripts/* test_data/* *.toml .git* .editorconfig fuzz/Cargo.lock fuzz/.gitignore resources/linux-config-* vmm/src/api/openapi/cloud-hypervisor.yaml CODEOWNERS Cargo.lock
 Copyright: 2024
 License: Apache-2.0
+
+Files: linux-fieldwork/acpi-errors/*.py linux-fieldwork/acpi-errors/*.patch
+Copyright: 2026
+License: Apache-2.0 AND BSD-3-Clause
