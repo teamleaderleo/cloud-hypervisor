@@ -10,11 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-
-env:
-  CACHE_ERROR_COMMIT: 23c8d996457eb8f489f5cfb1bf7f33c9e506e44e
-  CACHE_ERROR_PROPAGATION_BLOB: cbfe0675d08f3b4bc1871d3825b9c67d8d5ac71c
+  contents: read
 
 jobs:
   candidate:
@@ -28,21 +24,14 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Select repaired cache-error prerequisite
-        run: |
-          sed -i "s/^CACHE_COMMIT = .*/CACHE_COMMIT = \"${CACHE_ERROR_COMMIT}\"/" linux-fieldwork/cache-index/run_candidate.py
-          sed -i "s/^CACHE_PROPAGATION_BLOB = .*/CACHE_PROPAGATION_BLOB = \"${CACHE_ERROR_PROPAGATION_BLOB}\"/" linux-fieldwork/cache-index/run_candidate.py
-          grep -F "CACHE_COMMIT = \"${CACHE_ERROR_COMMIT}\"" linux-fieldwork/cache-index/run_candidate.py
-          grep -F "CACHE_PROPAGATION_BLOB = \"${CACHE_ERROR_PROPAGATION_BLOB}\"" linux-fieldwork/cache-index/run_candidate.py
-      - name: Apply exact prerequisites and generate candidate
+      - name: Apply exact prerequisites and exact candidate
         run: python3 linux-fieldwork/cache-index/run_candidate.py
       - name: Verify one-file product scope
         run: |
           git diff --check
           git diff --name-only HEAD | tee /tmp/changed-files.txt
-          test "$(wc -l < /tmp/changed-files.txt)" -eq 2
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 1
           grep -Fx 'arch/src/aarch64/cache.rs' /tmp/changed-files.txt
-          grep -Fx 'linux-fieldwork/cache-index/run_candidate.py' /tmp/changed-files.txt
       - name: Verify nightly formatting
         run: cargo +nightly fmt --all -- --check
       - name: Execute all AArch64 cache tests
@@ -73,29 +62,13 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression Clippy
         run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
-      - name: Retain generated candidate diff
+      - name: Retain and verify exact candidate diff
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
+          cmp linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch
+          echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  linux-fieldwork/cache-index/candidate.patch' | sha256sum -c -
           echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  /tmp/cache-index-candidate.patch' | sha256sum -c -
-          sha256sum /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
-      - name: Freeze exact candidate and prerequisite receipt
-        if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
-        env:
-          BRANCH: linux-fieldwork/cache-index-portability
-        run: |
-          git fetch origin "$BRANCH"
-          git reset --hard "origin/$BRANCH"
-          sed -i "s/^CACHE_COMMIT = .*/CACHE_COMMIT = \"${CACHE_ERROR_COMMIT}\"/" linux-fieldwork/cache-index/run_candidate.py
-          sed -i "s/^CACHE_PROPAGATION_BLOB = .*/CACHE_PROPAGATION_BLOB = \"${CACHE_ERROR_PROPAGATION_BLOB}\"/" linux-fieldwork/cache-index/run_candidate.py
-          cp /tmp/cache-index-candidate.patch linux-fieldwork/cache-index/candidate.patch
-          git add linux-fieldwork/cache-index/run_candidate.py linux-fieldwork/cache-index/candidate.patch
-          if git diff --cached --quiet; then
-            echo 'candidate and prerequisite receipt already frozen'
-            exit 0
-          fi
-          git -c user.name='Linux Fieldwork CI' -c user.email='linux-fieldwork@example.invalid' \
-            commit -m 'linux-fieldwork: freeze repaired identity-aware cache candidate'
-          git push origin "HEAD:$BRANCH"
+          sha256sum linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
