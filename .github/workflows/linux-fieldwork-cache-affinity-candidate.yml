@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   candidate:
@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Record carrier head
+        run: git rev-parse HEAD > /tmp/cache-affinity-carrier-head.txt
       - name: Install AArch64 candidate toolchain
         run: |
           sudo apt-get update
@@ -83,12 +85,25 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Retain candidate diff
+      - name: Retain and freeze candidate diff
         run: |
           git diff --binary HEAD -- \
             arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs \
             vmm/src/cpu.rs vmm/src/vm.rs > /tmp/cache-affinity-candidate.patch
           sha256sum /tmp/cache-affinity-candidate.patch | tee /tmp/candidate-sha256.txt
+          test "$(git hash-object /tmp/cache-affinity-candidate.patch)" = \
+            57542277a76d84ed4bfca58aab871ef27f090beb
+          test "$(cut -d' ' -f1 /tmp/candidate-sha256.txt)" = \
+            8d5338bfa915420f981802929dea8bf6aad11da77c75f7c602cd73e5aca6b19c
+          ORIGINAL_HEAD=$(cat /tmp/cache-affinity-carrier-head.txt)
+          git reset --hard "$ORIGINAL_HEAD"
+          cp /tmp/cache-affinity-candidate.patch linux-fieldwork/cache-affinity/candidate.patch
+          git config user.name 'Linux Fieldwork CI'
+          git config user.email 'linux-fieldwork@example.invalid'
+          git add linux-fieldwork/cache-affinity/candidate.patch
+          test "$(git diff --cached --name-only)" = 'linux-fieldwork/cache-affinity/candidate.patch'
+          git commit -m 'linux-fieldwork: store exact cache affinity candidate bytes'
+          git push origin HEAD:linux-fieldwork/cache-affinity-selection
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
