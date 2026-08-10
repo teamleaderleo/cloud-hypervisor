@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,10 @@ AFFINITY_PATCH_BLOB = "75601cb2fa2a7d8f8f85dcdd9c3724c41a18d947"
 L3_COMMIT = "383eebc96afa743dd365c82f34b2feb944a71cf9"
 L3_PATCH_PATH = "linux-fieldwork/fdt-l3-smt/candidate.patch"
 L3_PATCH_BLOB = "239a2a7c9a7fe7031a594605f3801f2b06c53fa2"
+
+CANDIDATE_PATH = Path("linux-fieldwork/aarch64-max-boot-fdt/candidate.patch")
+CANDIDATE_BLOB = "c0fdacec33e6e2080118b568ed1668be5cea492f"
+CANDIDATE_SHA256 = "0378049238e3625690577f11168d98ee66a35084d4a68f486632dba33550e694"
 
 
 def run(*args: str) -> None:
@@ -105,84 +110,22 @@ run(
     "ci: apply validated FDT L3 SMT prerequisite",
 )
 
-config_path = Path("vmm/src/config.rs")
-config = config_path.read_text()
+actual_blob = output("git", "hash-object", str(CANDIDATE_PATH))
+if actual_blob != CANDIDATE_BLOB:
+    raise RuntimeError(
+        f"candidate patch identity mismatch: expected {CANDIDATE_BLOB}, found {actual_blob}"
+    )
+actual_sha256 = hashlib.sha256(CANDIDATE_PATH.read_bytes()).hexdigest()
+if actual_sha256 != CANDIDATE_SHA256:
+    raise RuntimeError(
+        f"candidate patch sha256 mismatch: expected {CANDIDATE_SHA256}, found {actual_sha256}"
+    )
 
-error_anchor = '''    /// Max is less than boot
-    #[error("Max CPUs ({0}) lower than boot CPUs ({1})")]
-    CpusMaxLowerThanBoot(u32 /* max vCPUs */, u32 /* boot vCPUs */),
-'''
-error_replacement = error_anchor + '''    #[cfg(target_arch = "aarch64")]
-    /// CPU hotplug is unsupported on AArch64.
-    #[error("CPU hotplug is not supported on AArch64")]
-    Aarch64CpuHotplugUnsupported,
-'''
-if error_anchor not in config:
-    raise RuntimeError("CPU validation error anchor changed")
-config = config.replace(error_anchor, error_replacement, 1)
+run("git", "apply", "--check", str(CANDIDATE_PATH))
+run("git", "apply", str(CANDIDATE_PATH))
+run("cargo", "+nightly", "fmt", "--all", "--", "--check")
 
-validation_anchor = '''        if self.cpus.max_vcpus < self.cpus.boot_vcpus {
-            return Err(ValidationError::CpusMaxLowerThanBoot(
-                self.cpus.max_vcpus,
-                self.cpus.boot_vcpus,
-            ));
-        }
-'''
-validation_replacement = validation_anchor + '''
-        #[cfg(target_arch = "aarch64")]
-        if self.cpus.max_vcpus != self.cpus.boot_vcpus {
-            return Err(ValidationError::Aarch64CpuHotplugUnsupported);
-        }
-'''
-if validation_anchor not in config:
-    raise RuntimeError("CPU max/boot validation anchor changed")
-config = config.replace(validation_anchor, validation_replacement, 1)
-
-test_anchor = '''        let mut still_valid_config = valid_config.clone();
-        still_valid_config.cpus.max_vcpus = 8;
-        still_valid_config.cpus.boot_vcpus = 8;
-        still_valid_config.cpus.topology = Some(CpuTopology {
-            threads_per_core: 2,
-            cores_per_die: 4,
-            dies_per_package: 1,
-            packages: 1,
-        });
-        still_valid_config.validate().unwrap();
-'''
-test_addition = test_anchor + '''
-        #[cfg(target_arch = "aarch64")]
-        {
-            let mut invalid_config = valid_config.clone();
-            invalid_config.cpus.max_vcpus = 4;
-            invalid_config.cpus.boot_vcpus = 2;
-            invalid_config.cpus.topology = Some(CpuTopology {
-                threads_per_core: 1,
-                cores_per_die: 4,
-                dies_per_package: 1,
-                packages: 1,
-            });
-            assert_eq!(
-                invalid_config.validate(),
-                Err(ValidationError::Aarch64CpuHotplugUnsupported)
-            );
-
-            let mut still_valid_config = valid_config.clone();
-            still_valid_config.cpus.max_vcpus = 4;
-            still_valid_config.cpus.boot_vcpus = 4;
-            still_valid_config.cpus.topology = Some(CpuTopology {
-                threads_per_core: 1,
-                cores_per_die: 4,
-                dies_per_package: 1,
-                packages: 1,
-            });
-            still_valid_config.validate().unwrap();
-        }
-'''
-if test_anchor not in config:
-    raise RuntimeError("configuration validation test anchor changed")
-config = config.replace(test_anchor, test_addition, 1)
-
-config_path.write_text(config)
-run("cargo", "+nightly", "fmt", "--all")
 print("aarch64-max-boot-prerequisites-applied")
-print("aarch64-max-boot-validation-candidate-applied")
+print("aarch64-max-boot-stored-candidate-verified")
+print("aarch64-max-boot-stored-candidate-applied")
+print("aarch64-max-boot-candidate-format-verified")
