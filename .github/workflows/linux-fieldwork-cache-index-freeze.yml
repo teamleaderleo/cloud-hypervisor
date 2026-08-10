@@ -1,0 +1,45 @@
+name: Linux Fieldwork freeze AArch64 cache identity candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/cache-index-portability
+    paths:
+      - .github/workflows/linux-fieldwork-cache-index-freeze.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  freeze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install candidate toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Generate exact candidate
+        run: |
+          python3 linux-fieldwork/cache-index/run_candidate.py
+          git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
+          echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  /tmp/cache-index-candidate.patch' | sha256sum -c -
+      - name: Freeze exact bytes on carrier branch
+        env:
+          BRANCH: linux-fieldwork/cache-index-portability
+        run: |
+          git fetch origin "$BRANCH"
+          git reset --hard "origin/$BRANCH"
+          cp /tmp/cache-index-candidate.patch linux-fieldwork/cache-index/candidate.patch
+          git diff --check -- linux-fieldwork/cache-index/candidate.patch
+          git add linux-fieldwork/cache-index/candidate.patch
+          if git diff --cached --quiet; then
+            echo 'candidate already frozen'
+            exit 0
+          fi
+          git -c user.name='Linux Fieldwork CI' -c user.email='linux-fieldwork@example.invalid' \
+            commit -m 'linux-fieldwork: freeze identity-aware cache candidate'
+          git push origin "HEAD:$BRANCH"
