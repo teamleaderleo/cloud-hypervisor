@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and validation candidate
+      - name: Apply exact prerequisites and stored validation candidate
         run: python3 linux-fieldwork/aarch64-max-boot-fdt/run_candidate.py
       - name: Verify one-file product scope
         run: |
@@ -57,10 +57,19 @@ jobs:
         run: cargo test -p vmm --features kvm test_config_validation
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Retain candidate diff
+      - name: Verify exact candidate convergence
         run: |
           git diff --binary HEAD -- vmm/src/config.rs > /tmp/aarch64-max-boot-candidate.patch
-          sha256sum /tmp/aarch64-max-boot-candidate.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/aarch64-max-boot-fdt/candidate.patch \
+            /tmp/aarch64-max-boot-candidate.patch
+          sha256sum linux-fieldwork/aarch64-max-boot-fdt/candidate.patch \
+            | tee /tmp/stored-candidate-sha256.txt
+          sha256sum /tmp/aarch64-max-boot-candidate.patch \
+            | tee /tmp/generated-candidate-sha256.txt
+          test "$(cut -d' ' -f1 /tmp/stored-candidate-sha256.txt)" = \
+            0378049238e3625690577f11168d98ee66a35084d4a68f486632dba33550e694
+          test "$(cut -d' ' -f1 /tmp/generated-candidate-sha256.txt)" = \
+            0378049238e3625690577f11168d98ee66a35084d4a68f486632dba33550e694
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -70,5 +79,6 @@ jobs:
             /tmp/aarch64-max-boot-candidate-policy.log
             /tmp/aarch64-max-boot-candidate-tests.log
             /tmp/aarch64-max-boot-candidate.patch
-            /tmp/candidate-sha256.txt
+            /tmp/stored-candidate-sha256.txt
+            /tmp/generated-candidate-sha256.txt
           if-no-files-found: warn
