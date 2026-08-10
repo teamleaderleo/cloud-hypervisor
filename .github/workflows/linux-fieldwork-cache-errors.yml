@@ -13,32 +13,71 @@ permissions:
   contents: read
 
 jobs:
-  aarch64-test-harness:
+  candidate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Verify exact source boundary
-        run: |
-          test "$(git hash-object arch/src/aarch64/cache.rs)" = 9200c59627beba0e6366b5105d2fe51a312efaed
-          test "$(git hash-object vmm/src/cpu.rs)" = 5d9499878b04f7c0fb53cece5768988ceb439d25
-          test "$(git hash-object vmm/src/acpi.rs)" = 6ac7666ebdc49c67fbc6233c135e8645f7e64e0f
-      - name: Install AArch64 execution tools
+      - name: Install candidate toolchains
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
-      - name: Execute AArch64 arch test harness
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact stacked candidate
+        run: python3 linux-fieldwork/cache-errors/run_candidate.py
+      - name: Verify successor scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 3
+          grep -Fx 'arch/src/aarch64/cache.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/cpu.rs' /tmp/changed-files.txt
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute AArch64 cache fixtures
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
         run: |
           set -o pipefail
-          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu -- --list 2>&1 | tee /tmp/aarch64-test-list.log
-          grep -F 'test' /tmp/aarch64-test-list.log
+          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests -- --nocapture 2>&1 | tee /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_missing_cache_root ... ok' /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_missing_cache_properties_use_defaults ... ok' /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_valid_cache_properties ... ok' /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_malformed_cache_size_is_error ... ok' /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_malformed_decimal_is_error ... ok' /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_cache_property_io_error_is_error ... ok' /tmp/cache-tests.log
+          grep -F 'test aarch64::cache::tests::test_cache_size_overflow_is_error ... ok' /tmp/cache-tests.log
+      - name: Clean fixture rerun
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests
+      - name: Focused AArch64 Clippy
+        run: |
+          cargo clippy -p arch --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+          cargo clippy -p vmm --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: AArch64 KVM vmm compile
+        run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+      - name: AArch64 MSHV vmm compile
+        run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+      - name: x86_64 KVM regression compile
+        run: cargo check -p vmm --features kvm
+      - name: Retain successor diffs
+        run: |
+          git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-parser.patch
+          git diff --binary HEAD -- vmm/src/cpu.rs vmm/src/acpi.rs > /tmp/cache-propagation.patch
+          sha256sum /tmp/cache-parser.patch /tmp/cache-propagation.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: linux-fieldwork-cache-errors-harness
-          path: /tmp/aarch64-test-list.log
+          name: linux-fieldwork-cache-errors-candidate
+          path: |
+            /tmp/changed-files.txt
+            /tmp/cache-tests.log
+            /tmp/cache-parser.patch
+            /tmp/cache-propagation.patch
+            /tmp/candidate-sha256.txt
           if-no-files-found: warn
