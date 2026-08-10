@@ -41,7 +41,7 @@ diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
 diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
 --- a/vmm/src/acpi.rs
 +++ b/vmm/src/acpi.rs
-@@ -25,7 +25,7 @@
+@@ -25,8 +25,8 @@
  use tracer::trace_scoped;
  use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
  use zerocopy::{FromBytes, Immutable, IntoBytes};
