@@ -24,7 +24,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and candidate
+      - name: Apply exact prerequisites and generate candidate
         run: python3 linux-fieldwork/cache-index/run_candidate.py
       - name: Verify one-file product scope
         run: |
@@ -41,10 +41,12 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests -- --nocapture 2>&1 | tee /tmp/cache-index-candidate-tests.log
-          grep -F 'test aarch64::cache::tests::test_split_l1_layout_is_preserved ... ok' /tmp/cache-index-candidate-tests.log
-          grep -F 'test aarch64::cache::tests::test_unified_l1_layout_is_omitted ... ok' /tmp/cache-index-candidate-tests.log
-          grep -F 'test aarch64::cache::tests::test_split_l2_layout_is_omitted ... ok' /tmp/cache-index-candidate-tests.log
-          grep -F 'test aarch64::cache::tests::test_extra_cache_level_is_omitted ... ok' /tmp/cache-index-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_split_l1_control_preserves_mapping ... ok' /tmp/cache-index-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_unified_l1_is_omitted ... ok' /tmp/cache-index-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_split_l2_is_omitted ... ok' /tmp/cache-index-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_higher_cache_level_does_not_shift_mapping ... ok' /tmp/cache-index-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_missing_cache_identity_is_error ... ok' /tmp/cache-index-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_invalid_cache_type_is_error ... ok' /tmp/cache-index-candidate-tests.log
           grep -F 'test aarch64::cache::tests::test_malformed_cache_size_is_error ... ok' /tmp/cache-index-candidate-tests.log
           grep -F 'test aarch64::cache::tests::test_cache_property_io_error_is_error ... ok' /tmp/cache-index-candidate-tests.log
       - name: Clean cache-test rerun
@@ -60,11 +62,10 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Retain and verify candidate diff
+      - name: Retain generated candidate diff
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
-          cmp linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch
-          sha256sum linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
+          sha256sum /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
