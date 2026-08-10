@@ -34,6 +34,8 @@ jobs:
           set -o pipefail
           cargo test -p vmm --features kvm acpi::tests::test_next_table_address -- --exact 2>&1 | tee /tmp/acpi-test.log
           grep -F 'test acpi::tests::test_next_table_address ... ok' /tmp/acpi-test.log
+      - name: Focused Clippy
+        run: cargo clippy -p vmm --all-targets --features kvm,fw_cfg,tdx -- -D warnings
       - name: KVM vmm compile
         run: cargo check -p vmm --features kvm
       - name: MSHV vmm compile
@@ -49,8 +51,11 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
           cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
           cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
-      - name: Retain candidate diff
-        run: git diff --binary > /tmp/acpi-error-propagation.patch
+      - name: Retain and verify candidate diff
+        run: |
+          git diff --binary > /tmp/acpi-error-propagation.patch
+          cmp linux-fieldwork/acpi-errors/candidate.patch /tmp/acpi-error-propagation.patch
+          sha256sum linux-fieldwork/acpi-errors/candidate.patch /tmp/acpi-error-propagation.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -58,4 +63,5 @@ jobs:
           path: |
             /tmp/acpi-error-propagation.patch
             /tmp/changed-files.txt
+            /tmp/candidate-sha256.txt
           if-no-files-found: warn
