@@ -1,0 +1,62 @@
+name: Linux Fieldwork AArch64 FDT L3 SMT baseline
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/fdt-l3-smt
+  pull_request:
+    branches:
+      - linux-fieldwork/cache-affinity-upstream-snapshot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install AArch64 probe toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact prerequisites and inject test-only probe
+        run: python3 linux-fieldwork/fdt-l3-smt/run_probe.py
+      - name: Verify test-only scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 1
+          grep -Fx 'arch/src/aarch64/fdt.rs' /tmp/changed-files.txt
+      - name: Verify current FDT/PPTT package policy
+        run: python3 linux-fieldwork/fdt-l3-smt/verify_policy.py | tee /tmp/fdt-l3-smt-policy.log
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute AArch64 SMT L3 discriminator
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu \
+            l3_smt_mapping_tests -- --nocapture 2>&1 | tee /tmp/fdt-l3-smt-tests.log
+          grep -F 'test aarch64::fdt::l3_smt_mapping_tests::test_current_l3_package_selector_exceeds_emitted_nodes_with_smt ... ok' /tmp/fdt-l3-smt-tests.log
+      - name: Retain baseline probe
+        run: |
+          git diff --binary HEAD -- arch/src/aarch64/fdt.rs > /tmp/fdt-l3-smt-probe.patch
+          sha256sum /tmp/fdt-l3-smt-probe.patch | tee /tmp/probe-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-fdt-l3-smt-baseline
+          path: |
+            /tmp/changed-files.txt
+            /tmp/fdt-l3-smt-policy.log
+            /tmp/fdt-l3-smt-tests.log
+            /tmp/fdt-l3-smt-probe.patch
+            /tmp/probe-sha256.txt
+          if-no-files-found: warn
