@@ -34,7 +34,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
         run: |
           set -o pipefail
-          cargo test -p arch --target aarch64-unknown-linux-gnu -- --list 2>&1 | tee /tmp/aarch64-test-list.log
+          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu -- --list 2>&1 | tee /tmp/aarch64-test-list.log
           grep -F 'test' /tmp/aarch64-test-list.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
