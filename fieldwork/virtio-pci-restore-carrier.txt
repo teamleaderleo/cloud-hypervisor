@@ -1,0 +1,6 @@
+Linux Fieldwork validation carrier
+
+Canonical source: a18a2b3f66f7a3cec7f62d07605945beda8eb5d3
+Fieldwork issue: teamleaderleo/linux-fieldwork#563
+Internal carrier: teamleaderleo/cloud-hypervisor#14
+External contact: none
