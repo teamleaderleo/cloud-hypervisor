@@ -1,0 +1,22 @@
+diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
+--- a/arch/src/aarch64/cache.rs
++++ b/arch/src/aarch64/cache.rs
+@@ -246,6 +246,7 @@
+ #[cfg(test)]
+ mod tests {
+     use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::{env, process};
+ 
+     use super::*;
+ 
+@@ -257,9 +258,9 @@
+     impl TestDir {
+         fn new() -> Self {
+-            let path = std::env::temp_dir().join(format!(
++            let path = env::temp_dir().join(format!(
+                 "cloud-hypervisor-cache-test-{}-{}",
+-                std::process::id(),
++                process::id(),
+                 NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+             ));
+             fs::create_dir(&path).unwrap();
