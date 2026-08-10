@@ -87,7 +87,7 @@ index 68fc175..b8a9bd5 100644
 +    #[error("Failed to create ACPI processor topology")]
 +    ProcessorTopology(#[source] CpuError),
 +
-     #[error("ACPI table delivery requires fw_cfg")]
+     #[error("Missing fw_cfg device for ACPI tables")]
      MissingFwCfg,
  
 @@ -966,7 +972,9 @@ fn create_acpi_tables_internal(
