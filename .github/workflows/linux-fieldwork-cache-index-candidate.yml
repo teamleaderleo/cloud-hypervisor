@@ -67,8 +67,13 @@ jobs:
       - name: Retain and verify exact candidate diff
         run: |
           git diff --binary --full-index HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
+          echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  linux-fieldwork/cache-index/candidate.patch' | sha256sum -c -
+          echo 'ee57a555a56792604f7128304fe5658f7ff6198b2f3e9961b41a1fff515d89fe  /tmp/cache-index-candidate.patch' | sha256sum -c -
+          git patch-id --stable < linux-fieldwork/cache-index/candidate.patch | awk '{print $1}' > /tmp/stored-patch-id.txt
+          git patch-id --stable < /tmp/cache-index-candidate.patch | awk '{print $1}' > /tmp/generated-patch-id.txt
+          cmp /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt
           sha256sum linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
-          cmp linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch
+          cat /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt | tee /tmp/candidate-patch-ids.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -78,4 +83,5 @@ jobs:
             /tmp/cache-index-candidate-tests.log
             /tmp/cache-index-candidate.patch
             /tmp/candidate-sha256.txt
+            /tmp/candidate-patch-ids.txt
           if-no-files-found: warn
