@@ -18,31 +18,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify carrier and exact product bytes
+      - name: Verify exact product bytes
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD^^)" = "a1fcb9f790616ac615f66de73be540b0b20844b1"
-          test "$(git diff --name-only HEAD^^ HEAD^ | wc -l)" -eq 2
-          git diff --name-only HEAD^^ HEAD^ | tee /tmp/changed-files.txt
+          git fetch origin linux-fieldwork/acpi-error-v2:refs/remotes/origin/linux-fieldwork/acpi-error-v2
+          product=origin/linux-fieldwork/acpi-error-v2
+          base=a1fcb9f790616ac615f66de73be540b0b20844b1
+          test "$(git rev-parse "$product"^)" = "$base"
+          test "$(git diff --name-only "$base" "$product" | wc -l)" -eq 2
+          git diff --name-only "$base" "$product" | tee /tmp/changed-files.txt
           grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
-          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/linux-fieldwork-acpi-errors-v2.yml"
-          git diff --check HEAD^^ HEAD^
-          git --no-pager diff --no-color HEAD^^ HEAD^ -- vmm/src/acpi.rs vmm/src/vm.rs > /tmp/acpi-error-v2.patch
+          git diff --check "$base" "$product"
+          git --no-pager diff --no-color "$base" "$product" -- vmm/src/acpi.rs vmm/src/vm.rs > /tmp/acpi-error-v2.patch
           echo '76c53e120c22dab4886904a875e3aba86ae6d49130e4080cbcdb46ad3df56466  /tmp/acpi-error-v2.patch' | sha256sum --check
+          git rev-parse "$product" | tee /tmp/product-commit.txt
 
       - name: Check intended error boundary
         run: |
           set -euxo pipefail
-          git show HEAD^:vmm/src/acpi.rs | grep -F 'AddressOverflow'
-          git show HEAD^:vmm/src/acpi.rs | grep -F 'Missing fw_cfg device for ACPI tables'
-          git show HEAD^:vmm/src/acpi.rs | grep -F 'GuestMemory(#[source] vm_memory::GuestMemoryError)'
-          git show HEAD^:vmm/src/acpi.rs | grep -F 'FwCfg(#[source] io::Error)'
-          git show HEAD^:vmm/src/acpi.rs | grep -F 'fn next_table_address'
-          ! git show HEAD^:vmm/src/acpi.rs | grep -E 'PoisonError|PoisonedLock|poisoned_lock|test_generic_initiator_affinity_size|ACPI table delivery requires fw_cfg'
+          product=origin/linux-fieldwork/acpi-error-v2
+          git show "$product":vmm/src/acpi.rs | grep -F 'AddressOverflow'
+          git show "$product":vmm/src/acpi.rs | grep -F 'Missing fw_cfg device for ACPI tables'
+          git show "$product":vmm/src/acpi.rs | grep -F 'GuestMemory(#[source] vm_memory::GuestMemoryError)'
+          git show "$product":vmm/src/acpi.rs | grep -F 'FwCfg(#[source] io::Error)'
+          git show "$product":vmm/src/acpi.rs | grep -F 'fn next_table_address'
+          ! git show "$product":vmm/src/acpi.rs | grep -E 'PoisonError|PoisonedLock|poisoned_lock|test_generic_initiator_affinity_size|ACPI table delivery requires fw_cfg'
 
       - name: Check out exact product commit
-        run: git checkout --detach HEAD^
+        run: git checkout --detach origin/linux-fieldwork/acpi-error-v2
 
       - name: Install nightly rustfmt
         run: rustup toolchain install nightly --profile minimal --component rustfmt
@@ -79,11 +83,19 @@ jobs:
           cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
           cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
 
+      - name: RISC-V cloud-hypervisor build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-linux-gnu
+          rustup target add riscv64gc-unknown-linux-gnu
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc \
+            cargo build --locked --package cloud-hypervisor --no-default-features --features "kvm" --target riscv64gc-unknown-linux-gnu
+
       - name: Record exact product receipt
         if: always()
         run: |
           sha256sum /tmp/acpi-error-v2.patch | tee /tmp/candidate-sha256.txt
-          git rev-parse HEAD | tee /tmp/product-commit.txt
+          git rev-parse HEAD | tee /tmp/checked-product-commit.txt
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -94,4 +106,5 @@ jobs:
             /tmp/changed-files.txt
             /tmp/candidate-sha256.txt
             /tmp/product-commit.txt
+            /tmp/checked-product-commit.txt
           if-no-files-found: warn
