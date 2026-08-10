@@ -1,0 +1,379 @@
+name: Fieldwork virtio-pci restore
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/virtio-pci-restore-ring-index
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: baseline-discriminators
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact carrier
+        uses: actions/checkout@v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Inject focused restore tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("virtio-devices/src/transport/pci_device.rs")
+          text = path.read_text()
+          text = text.replace(
+              "    use vm_device::interrupt::InterruptSourceConfig;\n\n    use super::*;",
+              "    use vm_device::interrupt::InterruptSourceConfig;\n    use vm_memory::Bytes;\n\n    use super::*;",
+              1,
+          )
+          tests = r'''
+
+    const RESTORE_RAM_BASE: u64 = 0x4000_0000;
+    const RESTORE_QUEUE_SIZE: u16 = 256;
+
+    fn restore_ready_queue_state() -> QueueState {
+        QueueState {
+            max_size: RESTORE_QUEUE_SIZE,
+            size: RESTORE_QUEUE_SIZE,
+            ready: true,
+            desc_table: RESTORE_RAM_BASE,
+            avail_ring: RESTORE_RAM_BASE + 0x1000,
+            used_ring: RESTORE_RAM_BASE + 0x2000,
+        }
+    }
+
+    fn restore_inactive_queue_state() -> QueueState {
+        QueueState {
+            max_size: RESTORE_QUEUE_SIZE,
+            size: RESTORE_QUEUE_SIZE,
+            ready: false,
+            desc_table: 0,
+            avail_ring: 0,
+            used_ring: 0,
+        }
+    }
+
+    fn restore_test_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
+        GuestMemoryAtomic::new(
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(RESTORE_RAM_BASE), 0x3000)]).unwrap(),
+        )
+    }
+
+    fn restore_test_device(
+        memory: GuestMemoryAtomic<GuestMemoryMmap>,
+        device_activated: bool,
+        queues: Vec<QueueState>,
+    ) -> Result<VirtioPciDevice> {
+        let device = Arc::new(Mutex::new(QueuedTestDevice {
+            queue_sizes: vec![RESTORE_QUEUE_SIZE; queues.len()],
+        }));
+        let state = VirtioPciDeviceState {
+            device_activated,
+            queues,
+            interrupt_status: 0,
+            cap_pci_cfg_offset: 0,
+            cap_pci_cfg: VirtioPciCfgCap::new().as_slice().to_vec(),
+        };
+        let snapshot = Snapshot::new_from_state(&state).unwrap();
+
+        VirtioPciDevice::new(
+            "test-dev".to_string(),
+            memory,
+            device,
+            None,
+            &TestInterruptManager,
+            0,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            false,
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+            Some(&snapshot),
+        )
+    }
+
+    #[test]
+    fn restore_ring_indices_inactive_queue() {
+        let dev = restore_test_device(
+            restore_test_memory(),
+            false,
+            vec![restore_inactive_queue_state()],
+        )
+        .unwrap();
+
+        assert_eq!(dev.queues[0].next_avail(), 0);
+        assert_eq!(dev.queues[0].next_used(), 0);
+    }
+
+    #[test]
+    fn restore_ring_indices_active_queue() {
+        let memory = restore_test_memory();
+        memory
+            .memory()
+            .write_obj(
+                7u16.to_le(),
+                GuestAddress(RESTORE_RAM_BASE + 0x2000 + 2),
+            )
+            .unwrap();
+
+        let dev = restore_test_device(memory, true, vec![restore_ready_queue_state()]).unwrap();
+
+        assert_eq!(dev.queues[0].next_avail(), 7);
+        assert_eq!(dev.queues[0].next_used(), 7);
+    }
+
+    #[test]
+    fn restore_ring_indices_mixed_queues() {
+        let memory = restore_test_memory();
+        memory
+            .memory()
+            .write_obj(
+                7u16.to_le(),
+                GuestAddress(RESTORE_RAM_BASE + 0x2000 + 2),
+            )
+            .unwrap();
+
+        let dev = restore_test_device(
+            memory,
+            true,
+            vec![restore_ready_queue_state(), restore_inactive_queue_state()],
+        )
+        .unwrap();
+
+        assert_eq!(dev.queues[0].next_avail(), 7);
+        assert_eq!(dev.queues[0].next_used(), 7);
+        assert_eq!(dev.queues[1].next_avail(), 0);
+        assert_eq!(dev.queues[1].next_used(), 0);
+    }
+
+    #[test]
+    fn restore_ring_indices_invalid_ready_queue_returns_error() {
+        let mut state = restore_ready_queue_state();
+        state.used_ring = RESTORE_RAM_BASE + 0x8000;
+
+        assert!(restore_test_device(restore_test_memory(), true, vec![state]).is_err());
+    }
+'''
+          head, tail = text.rsplit("\n}", 1)
+          path.write_text(head + tests + "\n}" + tail)
+          PY
+      - name: Active queue positive control passes
+        run: cargo test --locked -p virtio-devices --lib restore_ring_indices_active_queue --features kvm
+      - name: Inactive and mixed queues expose baseline failure
+        run: |
+          set -u
+          set +e
+          cargo test --locked -p virtio-devices --lib restore_ring_indices_inactive_queue --features kvm > inactive.log 2>&1
+          inactive_status=$?
+          cargo test --locked -p virtio-devices --lib restore_ring_indices_mixed_queues --features kvm > mixed.log 2>&1
+          mixed_status=$?
+          set -e
+
+          cat inactive.log
+          cat mixed.log
+          test "$inactive_status" -ne 0
+          test "$mixed_status" -ne 0
+          grep -F "InvalidGuestAddress(GuestAddress(2))" inactive.log
+          grep -F "InvalidGuestAddress(GuestAddress(2))" mixed.log
+
+  candidate:
+    name: candidate-focused-gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact carrier
+        uses: actions/checkout@v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Rust nightly formatter
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - name: Inject focused restore tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("virtio-devices/src/transport/pci_device.rs")
+          text = path.read_text()
+          text = text.replace(
+              "    use vm_device::interrupt::InterruptSourceConfig;\n\n    use super::*;",
+              "    use vm_device::interrupt::InterruptSourceConfig;\n    use vm_memory::Bytes;\n\n    use super::*;",
+              1,
+          )
+          tests = r'''
+
+    const RESTORE_RAM_BASE: u64 = 0x4000_0000;
+    const RESTORE_QUEUE_SIZE: u16 = 256;
+
+    fn restore_ready_queue_state() -> QueueState {
+        QueueState {
+            max_size: RESTORE_QUEUE_SIZE,
+            size: RESTORE_QUEUE_SIZE,
+            ready: true,
+            desc_table: RESTORE_RAM_BASE,
+            avail_ring: RESTORE_RAM_BASE + 0x1000,
+            used_ring: RESTORE_RAM_BASE + 0x2000,
+        }
+    }
+
+    fn restore_inactive_queue_state() -> QueueState {
+        QueueState {
+            max_size: RESTORE_QUEUE_SIZE,
+            size: RESTORE_QUEUE_SIZE,
+            ready: false,
+            desc_table: 0,
+            avail_ring: 0,
+            used_ring: 0,
+        }
+    }
+
+    fn restore_test_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
+        GuestMemoryAtomic::new(
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(RESTORE_RAM_BASE), 0x3000)]).unwrap(),
+        )
+    }
+
+    fn restore_test_device(
+        memory: GuestMemoryAtomic<GuestMemoryMmap>,
+        device_activated: bool,
+        queues: Vec<QueueState>,
+    ) -> Result<VirtioPciDevice> {
+        let device = Arc::new(Mutex::new(QueuedTestDevice {
+            queue_sizes: vec![RESTORE_QUEUE_SIZE; queues.len()],
+        }));
+        let state = VirtioPciDeviceState {
+            device_activated,
+            queues,
+            interrupt_status: 0,
+            cap_pci_cfg_offset: 0,
+            cap_pci_cfg: VirtioPciCfgCap::new().as_slice().to_vec(),
+        };
+        let snapshot = Snapshot::new_from_state(&state).unwrap();
+
+        VirtioPciDevice::new(
+            "test-dev".to_string(),
+            memory,
+            device,
+            None,
+            &TestInterruptManager,
+            0,
+            EventFd::new(EFD_NONBLOCK).unwrap(),
+            false,
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+            Some(&snapshot),
+        )
+    }
+
+    #[test]
+    fn restore_ring_indices_inactive_queue() {
+        let dev = restore_test_device(
+            restore_test_memory(),
+            false,
+            vec![restore_inactive_queue_state()],
+        )
+        .unwrap();
+
+        assert_eq!(dev.queues[0].next_avail(), 0);
+        assert_eq!(dev.queues[0].next_used(), 0);
+    }
+
+    #[test]
+    fn restore_ring_indices_active_queue() {
+        let memory = restore_test_memory();
+        memory
+            .memory()
+            .write_obj(
+                7u16.to_le(),
+                GuestAddress(RESTORE_RAM_BASE + 0x2000 + 2),
+            )
+            .unwrap();
+
+        let dev = restore_test_device(memory, true, vec![restore_ready_queue_state()]).unwrap();
+
+        assert_eq!(dev.queues[0].next_avail(), 7);
+        assert_eq!(dev.queues[0].next_used(), 7);
+    }
+
+    #[test]
+    fn restore_ring_indices_mixed_queues() {
+        let memory = restore_test_memory();
+        memory
+            .memory()
+            .write_obj(
+                7u16.to_le(),
+                GuestAddress(RESTORE_RAM_BASE + 0x2000 + 2),
+            )
+            .unwrap();
+
+        let dev = restore_test_device(
+            memory,
+            true,
+            vec![restore_ready_queue_state(), restore_inactive_queue_state()],
+        )
+        .unwrap();
+
+        assert_eq!(dev.queues[0].next_avail(), 7);
+        assert_eq!(dev.queues[0].next_used(), 7);
+        assert_eq!(dev.queues[1].next_avail(), 0);
+        assert_eq!(dev.queues[1].next_used(), 0);
+    }
+
+    #[test]
+    fn restore_ring_indices_invalid_ready_queue_returns_error() {
+        let mut state = restore_ready_queue_state();
+        state.used_ring = RESTORE_RAM_BASE + 0x8000;
+
+        assert!(restore_test_device(restore_test_memory(), true, vec![state]).is_err());
+    }
+'''
+          head, tail = text.rsplit("\n}", 1)
+          path.write_text(head + tests + "\n}" + tail)
+          PY
+      - name: Apply minimal per-queue candidate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("virtio-devices/src/transport/pci_device.rs")
+          text = path.read_text()
+          old = '''                queue.set_next_avail(
+                    queue
+                        .used_idx(memory.memory().deref(), Ordering::Acquire)
+                        .unwrap()
+                        .0,
+                );
+                queue.set_next_used(
+                    queue
+                        .used_idx(memory.memory().deref(), Ordering::Acquire)
+                        .unwrap()
+                        .0,
+                );'''
+          new = '''                if state.queues[i].ready {
+                    let used_idx = queue
+                        .used_idx(memory.memory().deref(), Ordering::Acquire)
+                        .map_err(|e| {
+                            VirtioPciDeviceError::CreateVirtioPciDevice(anyhow!(
+                                "Failed to read the used index of queue {i}: {e}"
+                            ))
+                        })?
+                        .0;
+                    queue.set_next_avail(used_idx);
+                    queue.set_next_used(used_idx);
+                }'''
+          if old not in text:
+              raise SystemExit("restore-loop source context drifted")
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Nightly rustfmt
+        run: cargo +nightly fmt --all -- --check
+      - name: Focused restore tests
+        run: cargo test --locked -p virtio-devices --lib restore_ring_indices --features kvm
+      - name: Focused Clippy
+        run: cargo clippy --locked -p virtio-devices --lib --tests --features kvm -- -D warnings
