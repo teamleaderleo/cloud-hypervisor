@@ -2,13 +2,12 @@ diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
 index 6ac7666..a02117c 100644
 --- a/vmm/src/acpi.rs
 +++ b/vmm/src/acpi.rs
-@@ -2,6 +2,8 @@
+@@ -2,6 +2,6 @@
  //
  // SPDX-License-Identifier: Apache-2.0
  //
-+use std::io;
-+use std::sync::PoisonError;
- use std::time::Instant;
+-use std::time::Instant;
++use std::{io, result, sync::PoisonError, time::Instant};
  
  use acpi_tables::Aml;
 @@ -18,6 +20,7 @@ use arch::{NumaNodes, layout};
@@ -45,7 +44,7 @@ index 6ac7666..a02117c 100644
 +    FwCfg(#[source] io::Error),
 +}
 +
-+pub type Result<T> = std::result::Result<T, Error>;
++pub type Result<T> = result::Result<T, Error>;
 +
 +fn poisoned_lock<T>(_: PoisonError<T>, resource: &'static str) -> Error {
 +    Error::PoisonedLock(resource)
