@@ -4,32 +4,14 @@ from pathlib import Path
 cpu_file = Path("vmm/src/cpu.rs")
 cpu = cpu_file.read_text()
 
-old = '''#[cfg(target_arch = "aarch64")]
+start_marker = '''#[cfg(target_arch = "aarch64")]
 fn process_host_cpus() -> Result<Vec<usize>> {
-    // SAFETY: all zeros is a valid cpu_set_t bit pattern.
-    let mut cpuset: libc::cpu_set_t = unsafe { zeroed() };
-    // SAFETY: cpuset points to writable storage of the advertised size.
-    let ret = unsafe {
-        libc::sched_getaffinity(
-            0,
-            mem::size_of::<libc::cpu_set_t>(),
-            &mut cpuset,
-        )
-    };
-    if ret != 0 {
-        return Err(Error::HostCpuAffinity(io::Error::last_os_error()));
-    }
-
-    let mut host_cpus = Vec::new();
-    for host_cpu in 0..libc::CPU_SETSIZE as usize {
-        // SAFETY: host_cpu is bounded by CPU_SETSIZE and cpuset is initialized.
-        if unsafe { libc::CPU_ISSET(host_cpu, &cpuset) } {
-            host_cpus.push(host_cpu);
-        }
-    }
-    Ok(host_cpus)
-}
 '''
+end_marker = '''#[cfg(target_arch = "aarch64")]
+fn cache_host_cpus_from_affinity(
+'''
+start = cpu.index(start_marker)
+end = cpu.index(end_marker, start)
 
 new = '''#[cfg(target_arch = "aarch64")]
 fn host_cpus_from_affinity_words(words: &[usize]) -> Vec<usize> {
@@ -76,29 +58,18 @@ fn process_host_cpus() -> Result<Vec<usize>> {
         words.resize(words.len() * 2, 0);
     }
 }
+
 '''
+cpu = cpu[:start] + new + cpu[end:]
 
-if old not in cpu:
-    raise RuntimeError("fixed-size process_host_cpus body changed")
-cpu = cpu.replace(old, new, 1)
-
-module_end = '''    fn test_cache_host_cpus_adds_default_set_for_unpinned_vcpu() {
-        let affinity = BTreeMap::from([(0, vec![4, 5].into_boxed_slice())]);
-        assert_eq!(
-            cache_host_cpus_from_affinity(2, &affinity, &[0, 1, 2, 3]),
-            vec![0, 1, 2, 3, 4, 5]
-        );
-    }
-}
+module_marker = '''#[cfg(all(test, target_arch = "aarch64"))]
+mod cache_affinity_tests {
 '''
-module_replacement = '''    fn test_cache_host_cpus_adds_default_set_for_unpinned_vcpu() {
-        let affinity = BTreeMap::from([(0, vec![4, 5].into_boxed_slice())]);
-        assert_eq!(
-            cache_host_cpus_from_affinity(2, &affinity, &[0, 1, 2, 3]),
-            vec![0, 1, 2, 3, 4, 5]
-        );
-    }
+cpu.index(module_marker)
+if not cpu.endswith("}\n"):
+    raise RuntimeError("cache affinity test module is no longer file-final")
 
+high_cpu_test = '''
     #[test]
     fn test_host_cpus_from_affinity_words_supports_high_cpu_ids() {
         let high_cpu = 1300usize;
@@ -108,10 +79,7 @@ module_replacement = '''    fn test_cache_host_cpus_adds_default_set_for_unpinne
 
         assert_eq!(host_cpus_from_affinity_words(&words), vec![high_cpu]);
     }
-}
 '''
-if module_end not in cpu:
-    raise RuntimeError("cache affinity test module ending changed")
-cpu = cpu.replace(module_end, module_replacement, 1)
+cpu = cpu[:-2] + high_cpu_test + "}\n"
 
 cpu_file.write_text(cpu)
