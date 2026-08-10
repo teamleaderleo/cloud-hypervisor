@@ -70,16 +70,18 @@ diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
 index 68fc175..5520edd 100644
 --- a/vmm/src/acpi.rs
 +++ b/vmm/src/acpi.rs
-@@ -25,7 +25,7 @@ use tracer::trace_scoped;
+@@ -25,7 +25,9 @@ use tracer::trace_scoped;
  use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
  use zerocopy::{FromBytes, Immutable, IntoBytes};
  
 -use crate::cpu::CpuManager;
-+use crate::cpu::{CpuManager, Error as CpuError};
++#[cfg(target_arch = "aarch64")]
++use crate::cpu::Error as CpuError;
++use crate::cpu::CpuManager;
  use crate::device_manager::DeviceManager;
  use crate::memory_manager::MemoryManager;
  use crate::pci_segment::PciSegment;
-@@ -36,6 +36,10 @@ pub enum Error {
+@@ -36,6 +38,10 @@ pub enum Error {
      #[error("ACPI table address overflow")]
      AddressOverflow,
  
@@ -90,7 +92,7 @@ index 68fc175..5520edd 100644
      #[error("ACPI table delivery requires fw_cfg")]
      MissingFwCfg,
  
-@@ -966,7 +970,9 @@ fn create_acpi_tables_internal(
+@@ -966,7 +972,9 @@ fn create_acpi_tables_internal(
      // PPTT
      #[cfg(target_arch = "aarch64")]
      {
