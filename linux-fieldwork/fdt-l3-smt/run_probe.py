@@ -2,11 +2,11 @@
 import subprocess
 from pathlib import Path
 
-AFFINITY_COMMIT = "faae0e28627e9ebcbc7df3d3173ffe46f3e4baa4"
+AFFINITY_COMMIT = "9acace966a333c9314cceedd0e6f1cdaa8812850"
 AFFINITY_RUNNER_PATH = "linux-fieldwork/cache-affinity/run_candidate.py"
-AFFINITY_RUNNER_BLOB = "f983c0d2ff94621b58275e81fb48ea7ea73fe5df"
+AFFINITY_RUNNER_BLOB = "a176dfaa2a639a301b3c4371c14952d9d87e6091"
 AFFINITY_PATCH_PATH = "linux-fieldwork/cache-affinity/candidate.patch"
-AFFINITY_PATCH_BLOB = "57542277a76d84ed4bfca58aab871ef27f090beb"
+AFFINITY_PATCH_BLOB = "75601cb2fa2a7d8f8f85dcdd9c3724c41a18d947"
 
 
 def run(*args: str) -> None:
@@ -32,13 +32,13 @@ def materialize(commit: str, source_path: str, destination: Path, expected_blob:
         )
 
 
-run("git", "fetch", "--no-tags", "--depth=100", "origin", "linux-fieldwork/cache-affinity-selection")
+run("git", "fetch", "--no-tags", "origin", "linux-fieldwork/cache-affinity-selection")
 runner = Path("/tmp/cache-affinity-runner.py")
 materialize(AFFINITY_COMMIT, AFFINITY_RUNNER_PATH, runner, AFFINITY_RUNNER_BLOB)
 materialize(AFFINITY_COMMIT, AFFINITY_PATCH_PATH, Path(AFFINITY_PATCH_PATH), AFFINITY_PATCH_BLOB)
 run("python3", str(runner))
 
-# Freeze #543 as a prerequisite so the retained #546 diff remains test-only.
+# Freeze #543 v2 as a prerequisite so the retained #546 diff remains test-only.
 run(
     "git",
     "add",
@@ -47,6 +47,7 @@ run(
     "arch/src/aarch64/mod.rs",
     "vmm/src/cpu.rs",
     "vmm/src/vm.rs",
+    "vmm/src/vm_config.rs",
 )
 run(
     "git",
@@ -56,7 +57,7 @@ run(
     "user.email=linux-fieldwork@example.invalid",
     "commit",
     "-m",
-    "ci: apply validated cache affinity prerequisite",
+    "ci: apply validated cache affinity v2 prerequisite",
 )
 Path(AFFINITY_PATCH_PATH).unlink()
 try:
