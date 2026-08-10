@@ -11,59 +11,23 @@ EXPECTED_BLOBS = {
     "vmm/src/vm.rs": "12a9fe0ad7068df7b26082b32de65d6f54b33d04",
 }
 
-PATCHES = [
-    (
-        "linux-fieldwork/acpi-error-propagation",
-        "0a2f55acbd23b7f44899a69132a4236ef9240027",
-        "linux-fieldwork/acpi-errors/candidate.patch",
-        "034cebd92cf31e3b415cdd3d205035b96cd9c1fb",
-        "/tmp/acpi.patch",
-        ["vmm/src/acpi.rs", "vmm/src/vm.rs"],
-        "ci: apply validated ACPI prerequisite",
-    ),
-    (
-        "linux-fieldwork/cache-runtime-errors",
-        "044a728ddf5d9dbb00eba04a6df6679e84521441",
-        "linux-fieldwork/cache-errors/candidate.patch",
-        "f381a777ea3343c33d2dd0bdbde067a2a91cc692",
-        "/tmp/cache-parser.patch",
-        None,
-        None,
-    ),
-    (
-        "linux-fieldwork/cache-runtime-errors",
-        "044a728ddf5d9dbb00eba04a6df6679e84521441",
-        "linux-fieldwork/cache-errors/propagation.patch",
-        "9dab1cadb2d48c919fc5239c974a30e594a9a6c4",
-        "/tmp/cache-propagation.patch",
-        [
-            "arch/src/aarch64/cache.rs",
-            "arch/src/aarch64/fdt.rs",
-            "arch/src/aarch64/mod.rs",
-            "vmm/src/acpi.rs",
-            "vmm/src/cpu.rs",
-        ],
-        "ci: apply validated cache error prerequisite",
-    ),
-    (
-        "linux-fieldwork/cache-index-portability",
-        "7713a59e21c48262843da100087454dae3c0772d",
-        "linux-fieldwork/cache-index/candidate.patch",
-        "4550e55faba24d0c1ffc9f7be7a11596d5866b8a",
-        "/tmp/cache-index.patch",
-        ["arch/src/aarch64/cache.rs"],
-        "ci: apply validated cache index prerequisite",
-    ),
-    (
-        "linux-fieldwork/cache-sharing-pptt",
-        "b3c66237ed59f6d7ac521d821f2f9bf138868ead",
-        "linux-fieldwork/cache-sharing/candidate.patch",
-        "bb45c3741cdebecd183cd05b769dfd56da4f80ab",
-        "/tmp/cache-sharing.patch",
-        ["vmm/src/cpu.rs"],
-        "ci: apply validated cache sharing prerequisite",
-    ),
-]
+CANONICAL_BASE = "a1fcb9f790616ac615f66de73be540b0b20844b1"
+ACPI_BRANCH = "fix/8666-acpi-errors"
+ACPI_COMMIT = "e9c86bacee14a2fd6fe871dc678c6b3f1ac4012a"
+CACHE_BRANCH = "linux-fieldwork/cache-runtime-errors"
+CACHE_COMMIT = "a696e285eaece00335e106acdfb5a651ccb2261f"
+CACHE_PARSER_PATH = "linux-fieldwork/cache-errors/candidate.patch"
+CACHE_PARSER_BLOB = "64dc6a19b132aad66b1adaccf9aaa1853a734d7c"
+CACHE_PROPAGATION_PATH = "linux-fieldwork/cache-errors/propagation.patch"
+CACHE_PROPAGATION_BLOB = "9e175e73a26530d8dd5584cb15ae3ab4b36df196"
+INDEX_BRANCH = "linux-fieldwork/cache-index-portability"
+INDEX_COMMIT = "8dfd55a96b0cbf3d6891c25735455b8b793133e9"
+INDEX_PATH = "linux-fieldwork/cache-index/candidate.patch"
+INDEX_BLOB = "b6e21517377995f35ff6984ffc29f06a21db06b7"
+SHARING_BRANCH = "linux-fieldwork/cache-sharing-pptt"
+SHARING_COMMIT = "32cde9c6849c9744e2945f6900c8e4035f7ccf03"
+SHARING_PATH = "linux-fieldwork/cache-sharing/candidate.patch"
+SHARING_BLOB = "e606e0559e7d82689eb2ec2f29ed485715d36900"
 
 
 def run(*args: str) -> None:
@@ -72,6 +36,15 @@ def run(*args: str) -> None:
 
 def output(*args: str) -> str:
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def fetch_exact(branch: str, expected_commit: str) -> None:
+    run("git", "fetch", "--no-tags", "--depth=100", "origin", branch)
+    actual = output("git", "rev-parse", "FETCH_HEAD")
+    if actual != expected_commit:
+        raise RuntimeError(
+            f"{branch}: expected prerequisite head {expected_commit}, found {actual}"
+        )
 
 
 def materialize(commit: str, source_path: str, destination: str, expected_blob: str) -> Path:
@@ -90,24 +63,12 @@ def materialize(commit: str, source_path: str, destination: str, expected_blob: 
     return path
 
 
-for path, expected in EXPECTED_BLOBS.items():
-    actual = output("git", "hash-object", path)
-    if actual != expected:
-        raise RuntimeError(f"{path}: expected source blob {expected}, found {actual}")
-
-for branch in sorted({entry[0] for entry in PATCHES}):
-    run("git", "fetch", "--no-tags", "--depth=100", "origin", branch)
-
-pending_files = []
-for _branch, commit, source_path, expected_blob, destination, commit_files, message in PATCHES:
-    patch = materialize(commit, source_path, destination, expected_blob)
-    run("git", "apply", "--check", str(patch))
-    run("git", "apply", str(patch))
-    if commit_files is None:
-        continue
+def apply_and_commit(patches: list[Path], files: list[str], message: str) -> None:
+    for patch in patches:
+        run("git", "apply", "--check", str(patch))
+        run("git", "apply", str(patch))
     run("cargo", "+nightly", "fmt", "--all", "--", "--check")
-    files = pending_files + commit_files
-    run("git", "add", *dict.fromkeys(files))
+    run("git", "add", *files)
     run(
         "git",
         "-c",
@@ -118,7 +79,94 @@ for _branch, commit, source_path, expected_blob, destination, commit_files, mess
         "-m",
         message,
     )
-    pending_files = []
+
+
+for path, expected in EXPECTED_BLOBS.items():
+    actual = output("git", "hash-object", path)
+    if actual != expected:
+        raise RuntimeError(f"{path}: expected source blob {expected}, found {actual}")
+
+fetch_exact(ACPI_BRANCH, ACPI_COMMIT)
+acpi_files = output(
+    "git",
+    "diff",
+    "--name-only",
+    CANONICAL_BASE,
+    ACPI_COMMIT,
+    "--",
+    "vmm/src/acpi.rs",
+    "vmm/src/vm.rs",
+).splitlines()
+if acpi_files != ["vmm/src/acpi.rs", "vmm/src/vm.rs"]:
+    raise RuntimeError(f"unexpected ACPI prerequisite scope: {acpi_files}")
+
+acpi_bytes = subprocess.run(
+    [
+        "git",
+        "diff",
+        "--binary",
+        CANONICAL_BASE,
+        ACPI_COMMIT,
+        "--",
+        "vmm/src/acpi.rs",
+        "vmm/src/vm.rs",
+    ],
+    check=True,
+    capture_output=True,
+).stdout
+acpi = Path("/tmp/acpi.patch")
+acpi.write_bytes(acpi_bytes)
+apply_and_commit(
+    [acpi],
+    ["vmm/src/acpi.rs", "vmm/src/vm.rs"],
+    "ci: apply submitted ACPI prerequisite",
+)
+
+fetch_exact(CACHE_BRANCH, CACHE_COMMIT)
+cache_parser = materialize(
+    CACHE_COMMIT,
+    CACHE_PARSER_PATH,
+    "/tmp/cache-parser.patch",
+    CACHE_PARSER_BLOB,
+)
+cache_propagation = materialize(
+    CACHE_COMMIT,
+    CACHE_PROPAGATION_PATH,
+    "/tmp/cache-propagation.patch",
+    CACHE_PROPAGATION_BLOB,
+)
+apply_and_commit(
+    [cache_parser, cache_propagation],
+    [
+        "arch/src/aarch64/cache.rs",
+        "arch/src/aarch64/fdt.rs",
+        "arch/src/aarch64/mod.rs",
+        "vmm/src/acpi.rs",
+        "vmm/src/cpu.rs",
+    ],
+    "ci: apply validated cache error prerequisite",
+)
+
+fetch_exact(INDEX_BRANCH, INDEX_COMMIT)
+index_patch = materialize(INDEX_COMMIT, INDEX_PATH, "/tmp/cache-index.patch", INDEX_BLOB)
+apply_and_commit(
+    [index_patch],
+    ["arch/src/aarch64/cache.rs"],
+    "ci: apply validated cache identity prerequisite",
+)
+
+fetch_exact(SHARING_BRANCH, SHARING_COMMIT)
+sharing_patch = materialize(
+    SHARING_COMMIT,
+    SHARING_PATH,
+    "/tmp/cache-sharing.patch",
+    SHARING_BLOB,
+)
+apply_and_commit(
+    [sharing_patch],
+    ["vmm/src/cpu.rs"],
+    "ci: apply validated cache sharing prerequisite",
+)
 
 cache_file = Path("arch/src/aarch64/cache.rs")
 source = cache_file.read_text()
@@ -132,15 +180,23 @@ probe = r'''
         fs::create_dir_all(&cpu0_cache).unwrap();
         fs::create_dir_all(&cpu4_cache).unwrap();
 
-        write_identity(&cpu0_cache, 0, 1, "Data", "32K");
-        write_identity(&cpu0_cache, 1, 1, "Instruction", "32K");
-        write_identity(&cpu0_cache, 2, 2, "Unified", "256K");
-        write_identity(&cpu0_cache, 3, 3, "Unified", "4096K");
+        write_identity(&cpu0_cache, 0, 1, "Data");
+        write_property(&cpu0_cache, 0, "size", "32K");
+        write_identity(&cpu0_cache, 1, 1, "Instruction");
+        write_property(&cpu0_cache, 1, "size", "32K");
+        write_identity(&cpu0_cache, 2, 2, "Unified");
+        write_property(&cpu0_cache, 2, "size", "256K");
+        write_identity(&cpu0_cache, 3, 3, "Unified");
+        write_property(&cpu0_cache, 3, "size", "4096K");
 
-        write_identity(&cpu4_cache, 0, 1, "Data", "64K");
-        write_identity(&cpu4_cache, 1, 1, "Instruction", "64K");
-        write_identity(&cpu4_cache, 2, 2, "Unified", "1024K");
-        write_identity(&cpu4_cache, 3, 3, "Unified", "4096K");
+        write_identity(&cpu4_cache, 0, 1, "Data");
+        write_property(&cpu4_cache, 0, "size", "64K");
+        write_identity(&cpu4_cache, 1, 1, "Instruction");
+        write_property(&cpu4_cache, 1, "size", "64K");
+        write_identity(&cpu4_cache, 2, 2, "Unified");
+        write_property(&cpu4_cache, 2, "size", "1024K");
+        write_identity(&cpu4_cache, 3, 3, "Unified");
+        write_property(&cpu4_cache, 3, "size", "4096K");
 
         let cpu0 = read_cache_topology_from(&cpu0_cache).unwrap().unwrap();
         let cpu4 = read_cache_topology_from(&cpu4_cache).unwrap().unwrap();
@@ -157,5 +213,5 @@ if not source.endswith("\n}\n"):
     raise RuntimeError("cache.rs test module ending changed")
 cache_file.write_text(source[:-3] + probe + "\n}\n")
 run("cargo", "+nightly", "fmt", "--all")
-print("cache-affinity-prerequisites-applied")
-print("cache-affinity-probe-injected")
+print("cache-affinity-final-prerequisites-applied")
+print("cache-affinity-negative-control-probe-injected")
