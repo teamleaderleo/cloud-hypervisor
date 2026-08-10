@@ -1,5 +1,5 @@
 diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
-index 4918570..4e99026 100644
+index 4918570..61902e1 100644
 --- a/vmm/src/cpu.rs
 +++ b/vmm/src/cpu.rs
 @@ -1993,12 +1993,19 @@ impl CpuManager {
