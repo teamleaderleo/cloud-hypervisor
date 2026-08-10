@@ -31,6 +31,8 @@ jobs:
           git apply linux-fieldwork/cache-affinity/fdt-test-call.patch
           git apply --check linux-fieldwork/cache-affinity/clippy-fix.patch
           git apply linux-fieldwork/cache-affinity/clippy-fix.patch
+          git apply --check linux-fieldwork/cache-affinity/dynamic-affinity.patch
+          git apply linux-fieldwork/cache-affinity/dynamic-affinity.patch
       - name: Verify product scope
         run: |
           git diff --check
