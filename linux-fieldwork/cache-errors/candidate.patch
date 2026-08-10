@@ -1,0 +1,553 @@
+diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
+--- a/arch/src/aarch64/cache.rs
++++ b/arch/src/aarch64/cache.rs
+@@ -7,9 +7,46 @@
+ // found in the THIRD-PARTY file.
+ 
+ use std::fs;
+-use std::path::Path;
++use std::num::ParseIntError;
++use std::path::{Path, PathBuf};
++use std::{io, result};
+ 
+ use log::warn;
++use thiserror::Error;
++
++const CACHE_SYSFS_PATH: &str = "/sys/devices/system/cpu/cpu0/cache";
++
++#[derive(Debug, Error)]
++pub enum Error {
++    #[error("Failed to access cache topology path {path:?}")]
++    AccessCacheTopology {
++        path: PathBuf,
++        #[source]
++        source: io::Error,
++    },
++
++    #[error("Failed to read cache property {path:?}")]
++    ReadCacheProperty {
++        path: PathBuf,
++        #[source]
++        source: io::Error,
++    },
++
++    #[error("Failed to parse cache property {path:?}")]
++    ParseCacheProperty {
++        path: PathBuf,
++        #[source]
++        source: ParseIntError,
++    },
++
++    #[error("Invalid cache size format in {path:?}")]
++    InvalidCacheSize { path: PathBuf },
++
++    #[error("Cache size in {path:?} exceeds u32 bytes")]
++    CacheSizeOverflow { path: PathBuf },
++}
++
++pub type Result<T> = result::Result<T, Error>;
+ 
+ #[derive(Copy, Clone)]
+ pub enum CacheLevel {
+@@ -23,107 +60,117 @@
+     L3 = 3,
+ }
+ 
++impl CacheLevel {
++    fn index(self) -> u8 {
++        self as u8
++    }
++}
++
++fn cache_property_path(cache_path: &Path, cache_level: CacheLevel, property: &str) -> PathBuf {
++    cache_path
++        .join(format!("index{}", cache_level.index()))
++        .join(property)
++}
++
++fn read_optional_property(path: &Path) -> Result<Option<String>> {
++    match fs::read_to_string(path) {
++        Ok(value) => Ok(Some(value)),
++        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
++        Err(source) => Err(Error::ReadCacheProperty {
++            path: path.to_path_buf(),
++            source,
++        }),
++    }
++}
++
++fn get_cache_size_from(cache_path: &Path, cache_level: CacheLevel) -> Result<u32> {
++    let path = cache_property_path(cache_path, cache_level, "size");
++    let Some(src) = read_optional_property(&path)? else {
++        return Ok(0);
++    };
++    let src = src.trim();
++
++    let (digits, multiplier) = if let Some(digits) = src.strip_suffix('K') {
++        (digits, 1u32 << 10)
++    } else if let Some(digits) = src.strip_suffix('M') {
++        (digits, 1u32 << 20)
++    } else if let Some(digits) = src.strip_suffix('G') {
++        (digits, 1u32 << 30)
++    } else {
++        return Err(Error::InvalidCacheSize { path });
++    };
++
++    let value = digits
++        .parse::<u32>()
++        .map_err(|source| Error::ParseCacheProperty {
++            path: path.clone(),
++            source,
++        })?;
++
++    value
++        .checked_mul(multiplier)
++        .ok_or(Error::CacheSizeOverflow { path })
++}
++
+ /// NOTE: cache size file directory example,
+ /// "/sys/devices/system/cpu/cpu0/cache/index0/size".
+-pub fn get_cache_size(cache_level: CacheLevel) -> u32 {
+-    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+-    match cache_level {
+-        CacheLevel::L1D => file_directory += "/index0/size",
+-        CacheLevel::L1I => file_directory += "/index1/size",
+-        CacheLevel::L2 => file_directory += "/index2/size",
+-        CacheLevel::L3 => file_directory += "/index3/size",
+-    }
+-
+-    let file_path = Path::new(&file_directory);
+-    if file_path.exists() {
+-        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+-        // The content of the file is as simple as a size, like: "32K"
+-        let src = src.trim();
+-        let src_digits: u32 = src[0..src.len() - 1].parse().unwrap();
+-        let src_unit = &src[src.len() - 1..];
+-
+-        src_digits
+-            * match src_unit {
+-                "K" => 1u32 << 10,
+-                "M" => 1u32 << 20,
+-                "G" => 1u32 << 30,
+-                _ => 1,
+-            }
+-    } else {
+-        0
+-    }
++pub fn get_cache_size(cache_level: CacheLevel) -> Result<u32> {
++    get_cache_size_from(Path::new(CACHE_SYSFS_PATH), cache_level)
++}
++
++fn get_cache_u32_from(
++    cache_path: &Path,
++    cache_level: CacheLevel,
++    property: &str,
++) -> Result<u32> {
++    let path = cache_property_path(cache_path, cache_level, property);
++    let Some(src) = read_optional_property(&path)? else {
++        return Ok(0);
++    };
++
++    src.trim()
++        .parse::<u32>()
++        .map_err(|source| Error::ParseCacheProperty { path, source })
+ }
+ 
+ /// NOTE: coherency_line_size file directory example,
+ /// "/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size".
+-pub fn get_cache_coherency_line_size(cache_level: CacheLevel) -> u32 {
+-    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+-    match cache_level {
+-        CacheLevel::L1D => file_directory += "/index0/coherency_line_size",
+-        CacheLevel::L1I => file_directory += "/index1/coherency_line_size",
+-        CacheLevel::L2 => file_directory += "/index2/coherency_line_size",
+-        CacheLevel::L3 => file_directory += "/index3/coherency_line_size",
+-    }
+-
+-    let file_path = Path::new(&file_directory);
+-    if file_path.exists() {
+-        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+-        src.trim().parse::<u32>().unwrap()
+-    } else {
+-        0
+-    }
++pub fn get_cache_coherency_line_size(cache_level: CacheLevel) -> Result<u32> {
++    get_cache_u32_from(
++        Path::new(CACHE_SYSFS_PATH),
++        cache_level,
++        "coherency_line_size",
++    )
+ }
+ 
+ /// NOTE: number_of_sets file directory example,
+ /// "/sys/devices/system/cpu/cpu0/cache/index0/number_of_sets".
+-pub fn get_cache_number_of_sets(cache_level: CacheLevel) -> u32 {
+-    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+-    match cache_level {
+-        CacheLevel::L1D => file_directory += "/index0/number_of_sets",
+-        CacheLevel::L1I => file_directory += "/index1/number_of_sets",
+-        CacheLevel::L2 => file_directory += "/index2/number_of_sets",
+-        CacheLevel::L3 => file_directory += "/index3/number_of_sets",
+-    }
+-
+-    let file_path = Path::new(&file_directory);
+-    if file_path.exists() {
+-        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+-        src.trim().parse::<u32>().unwrap()
+-    } else {
+-        0
+-    }
++pub fn get_cache_number_of_sets(cache_level: CacheLevel) -> Result<u32> {
++    get_cache_u32_from(
++        Path::new(CACHE_SYSFS_PATH),
++        cache_level,
++        "number_of_sets",
++    )
++}
++
++fn get_cache_shared_from(cache_path: &Path, cache_level: CacheLevel) -> Result<bool> {
++    if matches!(cache_level, CacheLevel::L1D | CacheLevel::L1I) {
++        return Ok(false);
++    }
++
++    let path = cache_property_path(cache_path, cache_level, "shared_cpu_list");
++    let Some(src) = read_optional_property(&path)? else {
++        return Ok(false);
++    };
++    let src = src.trim();
++
++    Ok(!src.is_empty() && (src.contains('-') || src.contains(',')))
+ }
+ 
+ /// NOTE: shared_cpu_list file directory example,
+ /// "/sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list".
+-pub fn get_cache_shared(cache_level: CacheLevel) -> bool {
+-    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
+-    let mut result = true;
+-
+-    match cache_level {
+-        CacheLevel::L1D | CacheLevel::L1I => result = false,
+-        CacheLevel::L2 => file_directory += "/index2/shared_cpu_list",
+-        CacheLevel::L3 => file_directory += "/index3/shared_cpu_list",
+-    }
+-
+-    if !result {
+-        return false;
+-    }
+-
+-    let file_path = Path::new(&file_directory);
+-    if file_path.exists() {
+-        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
+-        let src = src.trim();
+-        if src.is_empty() {
+-            result = false;
+-        } else {
+-            result = src.contains('-') || src.contains(',');
+-        }
+-    } else {
+-        result = false;
+-    }
+-
+-    result
++pub fn get_cache_shared(cache_level: CacheLevel) -> Result<bool> {
++    get_cache_shared_from(Path::new(CACHE_SYSFS_PATH), cache_level)
+ }
+ 
+ #[derive(Default, Copy, Clone, Debug)]
+@@ -148,41 +195,207 @@
+     pub l3_cache_shared: bool,
+ }
+ 
+-/// Reads cache topology information from sysfs for cpu0.
+-pub fn read_cache_topology() -> Option<CacheTopologyInfo> {
+-    let cache_path = Path::new("/sys/devices/system/cpu/cpu0/cache");
+-    if !cache_path.exists() {
+-        warn!("Cache topology information is not available in sysfs.");
+-        return None;
++fn read_cache_topology_from(cache_path: &Path) -> Result<Option<CacheTopologyInfo>> {
++    match fs::metadata(cache_path) {
++        Ok(_) => {}
++        Err(source) if source.kind() == io::ErrorKind::NotFound => {
++            warn!("Cache topology information is not available in sysfs.");
++            return Ok(None);
++        }
++        Err(source) => {
++            return Err(Error::AccessCacheTopology {
++                path: cache_path.to_path_buf(),
++                source,
++            });
++        }
+     }
+ 
+     let mut info = CacheTopologyInfo {
+-        l1_d_cache_size: get_cache_size(CacheLevel::L1D),
+-        l1_d_cache_line_size: get_cache_coherency_line_size(CacheLevel::L1D),
+-        l1_d_cache_sets: get_cache_number_of_sets(CacheLevel::L1D),
+-
+-        l1_i_cache_size: get_cache_size(CacheLevel::L1I),
+-        l1_i_cache_line_size: get_cache_coherency_line_size(CacheLevel::L1I),
+-        l1_i_cache_sets: get_cache_number_of_sets(CacheLevel::L1I),
+-
+-        l2_cache_size: get_cache_size(CacheLevel::L2),
+-        l2_cache_line_size: get_cache_coherency_line_size(CacheLevel::L2),
+-        l2_cache_sets: get_cache_number_of_sets(CacheLevel::L2),
+-
+-        l3_cache_size: get_cache_size(CacheLevel::L3),
+-        l3_cache_line_size: get_cache_coherency_line_size(CacheLevel::L3),
+-        l3_cache_sets: get_cache_number_of_sets(CacheLevel::L3),
++        l1_d_cache_size: get_cache_size_from(cache_path, CacheLevel::L1D)?,
++        l1_d_cache_line_size: get_cache_u32_from(
++            cache_path,
++            CacheLevel::L1D,
++            "coherency_line_size",
++        )?,
++        l1_d_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L1D, "number_of_sets")?,
++
++        l1_i_cache_size: get_cache_size_from(cache_path, CacheLevel::L1I)?,
++        l1_i_cache_line_size: get_cache_u32_from(
++            cache_path,
++            CacheLevel::L1I,
++            "coherency_line_size",
++        )?,
++        l1_i_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L1I, "number_of_sets")?,
++
++        l2_cache_size: get_cache_size_from(cache_path, CacheLevel::L2)?,
++        l2_cache_line_size: get_cache_u32_from(
++            cache_path,
++            CacheLevel::L2,
++            "coherency_line_size",
++        )?,
++        l2_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L2, "number_of_sets")?,
++
++        l3_cache_size: get_cache_size_from(cache_path, CacheLevel::L3)?,
++        l3_cache_line_size: get_cache_u32_from(
++            cache_path,
++            CacheLevel::L3,
++            "coherency_line_size",
++        )?,
++        l3_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L3, "number_of_sets")?,
+ 
+         l2_cache_shared: false,
+         l3_cache_shared: false,
+     };
+ 
+     if info.l2_cache_size != 0 {
+-        info.l2_cache_shared = get_cache_shared(CacheLevel::L2);
++        info.l2_cache_shared = get_cache_shared_from(cache_path, CacheLevel::L2)?;
+     }
+     if info.l3_cache_size != 0 {
+-        info.l3_cache_shared = get_cache_shared(CacheLevel::L3);
+-    }
+-
+-    Some(info)
+-}
++        info.l3_cache_shared = get_cache_shared_from(cache_path, CacheLevel::L3)?;
++    }
++
++    Ok(Some(info))
++}
++
++/// Reads cache topology information from sysfs for cpu0.
++pub fn read_cache_topology() -> Result<Option<CacheTopologyInfo>> {
++    read_cache_topology_from(Path::new(CACHE_SYSFS_PATH))
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    use super::*;
++
++    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
++
++    struct TestDir(PathBuf);
++
++    impl TestDir {
++        fn new() -> Self {
++            let path = std::env::temp_dir().join(format!(
++                "cloud-hypervisor-cache-test-{}-{}",
++                std::process::id(),
++                NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
++            ));
++            fs::create_dir(&path).unwrap();
++            Self(path)
++        }
++
++        fn path(&self) -> &Path {
++            &self.0
++        }
++    }
++
++    impl Drop for TestDir {
++        fn drop(&mut self) {
++            fs::remove_dir_all(&self.0).unwrap();
++        }
++    }
++
++    fn write_property(cache_path: &Path, index: u8, property: &str, value: &str) {
++        let index_path = cache_path.join(format!("index{index}"));
++        fs::create_dir_all(&index_path).unwrap();
++        fs::write(index_path.join(property), value).unwrap();
++    }
++
++    #[test]
++    fn test_missing_cache_root() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("missing");
++
++        assert!(read_cache_topology_from(&cache_path).unwrap().is_none());
++    }
++
++    #[test]
++    fn test_missing_cache_properties_use_defaults() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++
++        let info = read_cache_topology_from(&cache_path).unwrap().unwrap();
++
++        assert_eq!(info.l1_d_cache_size, 0);
++        assert_eq!(info.l1_d_cache_line_size, 0);
++        assert_eq!(info.l1_d_cache_sets, 0);
++        assert_eq!(info.l2_cache_size, 0);
++        assert!(!info.l2_cache_shared);
++    }
++
++    #[test]
++    fn test_valid_cache_properties() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++
++        write_property(&cache_path, 0, "size", "32K\n");
++        write_property(&cache_path, 0, "coherency_line_size", "64\n");
++        write_property(&cache_path, 0, "number_of_sets", "128\n");
++        write_property(&cache_path, 2, "size", "1024K\n");
++        write_property(&cache_path, 2, "coherency_line_size", "64\n");
++        write_property(&cache_path, 2, "number_of_sets", "2048\n");
++        write_property(&cache_path, 2, "shared_cpu_list", "0-3\n");
++
++        let info = read_cache_topology_from(&cache_path).unwrap().unwrap();
++
++        assert_eq!(info.l1_d_cache_size, 32 * 1024);
++        assert_eq!(info.l1_d_cache_line_size, 64);
++        assert_eq!(info.l1_d_cache_sets, 128);
++        assert_eq!(info.l2_cache_size, 1024 * 1024);
++        assert_eq!(info.l2_cache_line_size, 64);
++        assert_eq!(info.l2_cache_sets, 2048);
++        assert!(info.l2_cache_shared);
++    }
++
++    #[test]
++    fn test_malformed_cache_size_is_error() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++        write_property(&cache_path, 0, "size", "32Q\n");
++
++        assert!(matches!(
++            read_cache_topology_from(&cache_path),
++            Err(Error::InvalidCacheSize { .. })
++        ));
++    }
++
++    #[test]
++    fn test_malformed_decimal_is_error() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++        write_property(&cache_path, 0, "coherency_line_size", "invalid\n");
++
++        assert!(matches!(
++            read_cache_topology_from(&cache_path),
++            Err(Error::ParseCacheProperty { .. })
++        ));
++    }
++
++    #[test]
++    fn test_cache_property_io_error_is_error() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir_all(cache_path.join("index0/size")).unwrap();
++
++        assert!(matches!(
++            read_cache_topology_from(&cache_path),
++            Err(Error::ReadCacheProperty { .. })
++        ));
++    }
++
++    #[test]
++    fn test_cache_size_overflow_is_error() {
++        let temp = TestDir::new();
++        let cache_path = temp.path().join("cache");
++        fs::create_dir(&cache_path).unwrap();
++        write_property(&cache_path, 0, "size", "4194304K\n");
++
++        assert!(matches!(
++            read_cache_topology_from(&cache_path),
++            Err(Error::CacheSizeOverflow { .. })
++        ));
++    }
++}
++diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
++--- a/vmm/src/cpu.rs
+++++ b/vmm/src/cpu.rs
++@@ -161,5 +161,9 @@
++     #[error("Error initialising GICR base address")]
++     VcpuSetGicrBaseAddr(#[source] hypervisor::HypervisorCpuError),
++ 
+++    #[cfg(target_arch = "aarch64")]
+++    #[error("Failed to read cache topology")]
+++    CacheTopology(#[source] arch::aarch64::cache::Error),
+++
++     #[error("Failed to join on vCPU threads: {0:?}")]
++     ThreadCleanup(Box<dyn any::Any + Send>),
++@@ -1963,7 +1963,7 @@
++     }
++ 
++     #[cfg(target_arch = "aarch64")]
++-    pub fn create_pptt(&self) -> PPTT {
+++    pub fn create_pptt(&self) -> Result<PPTT> {
++         let mut cpus = 0;
++         let mut uid = 0;
++         // If topology is not specified, the default setting is:
++@@ -1975,7 +1975,7 @@
++         let cores_per_package = cores_per_die * dies_per_package;
++ 
++         // Add cache info.
++-        let cache_info = read_cache_topology();
+++        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;
++         let CacheTopologyInfo {
++             l1_d_cache_size,
++             l1_d_cache_line_size,
++@@ -2110,7 +2110,7 @@
++             }
++         }
++ 
++-        pptt
+++        Ok(pptt)
++     }
++ 
++     #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
++diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
++--- a/vmm/src/acpi.rs
+++++ b/vmm/src/acpi.rs
++@@ -33,5 +33,9 @@
++     #[error("ACPI table address overflow")]
++     AddressOverflow,
++ 
+++    #[cfg(target_arch = "aarch64")]
+++    #[error("Failed to create ACPI processor topology")]
+++    ProcessorTopology(#[source] crate::cpu::Error),
+++
++     #[error("ACPI table delivery requires fw_cfg")]
++     MissingFwCfg,
++@@ -967,5 +967,7 @@
++     #[cfg(target_arch = "aarch64")]
++     {
++-        let pptt = cpu_manager.create_pptt();
+++        let pptt = cpu_manager
+++            .create_pptt()
+++            .map_err(Error::ProcessorTopology)?;
++         let pptt_addr = next_table_address(prev_tbl_addr, prev_tbl_len)?;
++         let mut pptt_bytes = Vec::new();
