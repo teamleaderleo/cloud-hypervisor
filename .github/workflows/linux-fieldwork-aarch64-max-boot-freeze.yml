@@ -1,0 +1,44 @@
+name: Linux Fieldwork AArch64 max-vs-boot freeze
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/aarch64-max-boot-fdt
+
+permissions:
+  contents: write
+
+jobs:
+  freeze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: linux-fieldwork/aarch64-max-boot-fdt
+          fetch-depth: 0
+      - name: Install AArch64 candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Generate and freeze exact proven candidate
+        run: |
+          ORIGINAL_HEAD=$(git rev-parse HEAD)
+          python3 linux-fieldwork/aarch64-max-boot-fdt/run_candidate.py
+          git diff --binary HEAD -- vmm/src/config.rs > /tmp/aarch64-max-boot-candidate.patch
+          test "$(git hash-object /tmp/aarch64-max-boot-candidate.patch)" = \
+            c0fdacec33e6e2080118b568ed1668be5cea492f
+          test "$(sha256sum /tmp/aarch64-max-boot-candidate.patch | cut -d' ' -f1)" = \
+            0378049238e3625690577f11168d98ee66a35084d4a68f486632dba33550e694
+          git reset --hard "$ORIGINAL_HEAD"
+          cp /tmp/aarch64-max-boot-candidate.patch \
+            linux-fieldwork/aarch64-max-boot-fdt/candidate.patch
+          git config user.name 'Linux Fieldwork CI'
+          git config user.email 'linux-fieldwork@example.invalid'
+          git add linux-fieldwork/aarch64-max-boot-fdt/candidate.patch
+          test "$(git diff --cached --name-only)" = \
+            'linux-fieldwork/aarch64-max-boot-fdt/candidate.patch'
+          git commit -m 'linux-fieldwork: store exact AArch64 max-vs-boot candidate bytes'
+          git push origin HEAD:linux-fieldwork/aarch64-max-boot-fdt
