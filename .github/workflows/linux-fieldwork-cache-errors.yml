@@ -1,0 +1,41 @@
+name: Linux Fieldwork AArch64 cache errors
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/cache-runtime-errors
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  aarch64-test-harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify exact source boundary
+        run: |
+          test "$(git hash-object arch/src/aarch64/cache.rs)" = 9200c59627beba0e6366b5105d2fe51a312efaed
+          test "$(git hash-object vmm/src/cpu.rs)" = 5d9499878b04f7c0fb53cece5768988ceb439d25
+          test "$(git hash-object vmm/src/acpi.rs)" = 6ac7666ebdc49c67fbc6233c135e8645f7e64e0f
+      - name: Install AArch64 execution tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+      - name: Execute AArch64 arch test harness
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p arch --target aarch64-unknown-linux-gnu -- --list 2>&1 | tee /tmp/aarch64-test-list.log
+          grep -F 'test' /tmp/aarch64-test-list.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-cache-errors-harness
+          path: /tmp/aarch64-test-list.log
+          if-no-files-found: warn
