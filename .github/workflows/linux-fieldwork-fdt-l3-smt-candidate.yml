@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and candidate
+      - name: Apply exact prerequisites and stored candidate
         run: python3 linux-fieldwork/fdt-l3-smt/run_candidate.py
       - name: Verify one-file product scope
         run: |
@@ -56,10 +56,16 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Retain candidate diff
+      - name: Verify exact candidate convergence
         run: |
           git diff --binary HEAD -- arch/src/aarch64/fdt.rs > /tmp/fdt-l3-smt-candidate.patch
-          sha256sum /tmp/fdt-l3-smt-candidate.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/fdt-l3-smt/candidate.patch /tmp/fdt-l3-smt-candidate.patch
+          sha256sum linux-fieldwork/fdt-l3-smt/candidate.patch | tee /tmp/stored-candidate-sha256.txt
+          sha256sum /tmp/fdt-l3-smt-candidate.patch | tee /tmp/generated-candidate-sha256.txt
+          test "$(cut -d' ' -f1 /tmp/stored-candidate-sha256.txt)" = \
+            146c6af0807ab5a7b8af98958a6b9836af9d44075711ef6d73e62621d14b3665
+          test "$(cut -d' ' -f1 /tmp/generated-candidate-sha256.txt)" = \
+            146c6af0807ab5a7b8af98958a6b9836af9d44075711ef6d73e62621d14b3665
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -69,5 +75,6 @@ jobs:
             /tmp/fdt-l3-smt-candidate-policy.log
             /tmp/fdt-l3-smt-candidate-tests.log
             /tmp/fdt-l3-smt-candidate.patch
-            /tmp/candidate-sha256.txt
+            /tmp/stored-candidate-sha256.txt
+            /tmp/generated-candidate-sha256.txt
           if-no-files-found: warn
