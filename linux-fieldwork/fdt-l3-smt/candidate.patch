@@ -1,0 +1,46 @@
+diff --git a/arch/src/aarch64/fdt.rs b/arch/src/aarch64/fdt.rs
+index 047c77ff6..06760c871 100644
+--- a/arch/src/aarch64/fdt.rs
++++ b/arch/src/aarch64/fdt.rs
+@@ -170,6 +170,11 @@ pub fn write_fdt_to_memory(fdt_final: &[u8], guest_mem: &GuestMemoryMmap) -> Res
+ }
+ 
+ // Following are the auxiliary function for creating the different nodes that we append to our FDT.
++fn l3_package_id(cpu_id: usize, threads_per_core: u16, cores_per_package: u16) -> u32 {
++    let logical_cpus_per_package = u32::from(threads_per_core) * u32::from(cores_per_package);
++    cpu_id as u32 / logical_cpus_per_package
++}
++
+ fn create_cpu_nodes(
+     fdt: &mut FdtWriter,
+     vcpu_mpidr: &[u64],
+@@ -279,7 +284,7 @@ fn create_cpu_nodes(
+                 fdt.property_u32("cache-level", 2)?;
+ 
+                 if l3_cache_size != 0 && l3_cache_shared {
+-                    let package_id: u32 = cpu_id as u32 / cores_per_package as u32;
++                    let package_id = l3_package_id(cpu_id, threads_per_core, cores_per_package);
+                     fdt.property_u32(
+                         "next-level-cache",
+                         package_id
+@@ -1185,3 +1190,20 @@ mod tests {
+         assert!(result.is_ok(), "Should default to 20 for missing distances");
+     }
+ }
++
++#[cfg(test)]
++mod l3_package_id_tests {
++    use super::l3_package_id;
++
++    #[test]
++    fn test_l3_package_id_single_thread_control() {
++        let package_ids: Vec<u32> = (0..4).map(|cpu_id| l3_package_id(cpu_id, 1, 2)).collect();
++        assert_eq!(package_ids, vec![0, 0, 1, 1]);
++    }
++
++    #[test]
++    fn test_l3_package_id_accounts_for_smt_threads() {
++        let package_ids: Vec<u32> = (0..8).map(|cpu_id| l3_package_id(cpu_id, 2, 2)).collect();
++        assert_eq!(package_ids, vec![0, 0, 0, 0, 1, 1, 1, 1]);
++    }
++}
