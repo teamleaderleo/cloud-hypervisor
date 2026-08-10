@@ -32,16 +32,16 @@ index 6ac7666..185fed7 100644
 +    #[error("ACPI table address overflow")]
 +    AddressOverflow,
 +
-+    #[error("fw_cfg is missing while ACPI table delivery is enabled")]
++    #[error("ACPI table delivery requires fw_cfg")]
 +    MissingFwCfg,
 +
 +    #[error("ACPI {0} mutex is poisoned")]
 +    PoisonedLock(&'static str),
 +
-+    #[error("failed to write ACPI data to guest memory")]
++    #[error("Failed to write ACPI data to guest memory")]
 +    GuestMemory(#[source] vm_memory::GuestMemoryError),
 +
-+    #[error("failed to add ACPI data to fw_cfg")]
++    #[error("Failed to add ACPI data to fw_cfg")]
 +    FwCfg(#[source] io::Error),
 +}
 +
