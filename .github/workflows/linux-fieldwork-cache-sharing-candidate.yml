@@ -66,6 +66,7 @@ jobs:
         run: |
           git diff --binary --full-index HEAD -- vmm/src/cpu.rs > /tmp/cache-sharing-candidate.patch
           echo '8729ff3d3c106768b536fbfb674f6cdbb0771d133c62e3d2c05de47012eed014  linux-fieldwork/cache-sharing/candidate.patch' | sha256sum -c -
+          echo 'dced58b28add79c073c1c87901e3340d44337306c9e19a5966c8bc019689c9e7  /tmp/cache-sharing-candidate.patch' | sha256sum -c -
           git patch-id --stable < linux-fieldwork/cache-sharing/candidate.patch | awk '{print $1}' > /tmp/stored-patch-id.txt
           git patch-id --stable < /tmp/cache-sharing-candidate.patch | awk '{print $1}' > /tmp/generated-patch-id.txt
           cmp /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt
