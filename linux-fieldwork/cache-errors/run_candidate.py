@@ -11,9 +11,9 @@ EXPECTED_BLOBS = {
     "vmm/src/vm.rs": "12a9fe0ad7068df7b26082b32de65d6f54b33d04",
 }
 
-ACPI_PREREQUISITE_COMMIT = "0a2f55acbd23b7f44899a69132a4236ef9240027"
-ACPI_PREREQUISITE_PATH = "linux-fieldwork/acpi-errors/candidate.patch"
-ACPI_PREREQUISITE_BLOB = "034cebd92cf31e3b415cdd3d205035b96cd9c1fb"
+ACPI_PREREQUISITE_BASE = "a1fcb9f790616ac615f66de73be540b0b20844b1"
+ACPI_PREREQUISITE_COMMIT = "e9c86bacee14a2fd6fe871dc678c6b3f1ac4012a"
+ACPI_PREREQUISITE_BRANCH = "fix/8666-acpi-errors"
 
 
 def run(*args: str) -> None:
@@ -38,23 +38,46 @@ run(
     "git",
     "fetch",
     "--no-tags",
-    "--depth=20",
+    "--depth=100",
     "origin",
-    "linux-fieldwork/acpi-error-propagation",
+    ACPI_PREREQUISITE_BRANCH,
 )
+fetched_head = output("git", "rev-parse", "FETCH_HEAD")
+if fetched_head != ACPI_PREREQUISITE_COMMIT:
+    raise RuntimeError(
+        "ACPI prerequisite branch moved: "
+        f"expected {ACPI_PREREQUISITE_COMMIT}, found {fetched_head}"
+    )
+
+changed = output(
+    "git",
+    "diff",
+    "--name-only",
+    ACPI_PREREQUISITE_BASE,
+    ACPI_PREREQUISITE_COMMIT,
+    "--",
+    "vmm/src/acpi.rs",
+    "vmm/src/vm.rs",
+).splitlines()
+if changed != ["vmm/src/acpi.rs", "vmm/src/vm.rs"]:
+    raise RuntimeError(f"unexpected ACPI prerequisite scope: {changed}")
+
 prerequisite = subprocess.run(
-    ["git", "show", f"{ACPI_PREREQUISITE_COMMIT}:{ACPI_PREREQUISITE_PATH}"],
+    [
+        "git",
+        "diff",
+        "--binary",
+        ACPI_PREREQUISITE_BASE,
+        ACPI_PREREQUISITE_COMMIT,
+        "--",
+        "vmm/src/acpi.rs",
+        "vmm/src/vm.rs",
+    ],
     check=True,
     capture_output=True,
 ).stdout
 prerequisite_path = Path("/tmp/acpi-prerequisite.patch")
 prerequisite_path.write_bytes(prerequisite)
-actual_prerequisite_blob = output("git", "hash-object", str(prerequisite_path))
-if actual_prerequisite_blob != ACPI_PREREQUISITE_BLOB:
-    raise RuntimeError(
-        "ACPI prerequisite patch identity mismatch: "
-        f"expected {ACPI_PREREQUISITE_BLOB}, found {actual_prerequisite_blob}"
-    )
 
 run("git", "apply", "--check", str(prerequisite_path))
 run("git", "apply", str(prerequisite_path))
@@ -68,7 +91,7 @@ run(
     "user.email=linux-fieldwork@example.invalid",
     "commit",
     "-m",
-    "ci: apply validated ACPI prerequisite",
+    "ci: apply submitted ACPI prerequisite",
 )
 
 candidate_dir = Path(__file__).parent
@@ -78,6 +101,6 @@ for patch_name in ["candidate.patch", "propagation.patch"]:
     run("git", "apply", str(patch_path))
 
 run("cargo", "+nightly", "fmt", "--all", "--", "--check")
-print("cache-error-acpi-prerequisite-applied")
+print("cache-error-submitted-acpi-prerequisite-applied")
 print("cache-error-candidate-applied")
 print("cache-error-candidate-format-verified")
