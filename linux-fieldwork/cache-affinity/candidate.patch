@@ -1,5 +1,5 @@
 diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
-index aeb2a40c1..6a579f9f0 100644
+index 06a290e1b427e0f8f365de326d942c7a3d6f0364..570e4fd0b561961899fa2914f7d518a35cd13b57 100644
 --- a/arch/src/aarch64/cache.rs
 +++ b/arch/src/aarch64/cache.rs
 @@ -14,6 +14,7 @@ use log::warn;
@@ -10,8 +10,8 @@ index aeb2a40c1..6a579f9f0 100644
  
  #[derive(Debug, Error)]
  pub enum Error {
-@@ -250,7 +251,7 @@ pub fn get_cache_shared(cache_level: CacheLevel) -> Result<bool> {
-     get_cache_shared_from(Path::new(CACHE_SYSFS_PATH), cache_level)
+@@ -361,7 +362,7 @@ pub fn get_cache_shared(cache_level: CacheLevel) -> Result<bool> {
+     get_cache_shared_from_index(cache_path, index)
  }
  
 -#[derive(Default, Copy, Clone, Debug)]
@@ -19,7 +19,7 @@ index aeb2a40c1..6a579f9f0 100644
  pub struct CacheTopologyInfo {
      pub l1_d_cache_size: u32,
      pub l1_d_cache_line_size: u32,
-@@ -338,6 +339,41 @@ pub fn read_cache_topology() -> Result<Option<CacheTopologyInfo>> {
+@@ -452,6 +453,41 @@ pub fn read_cache_topology() -> Result<Option<CacheTopologyInfo>> {
      read_cache_topology_from(Path::new(CACHE_SYSFS_PATH))
  }
  
@@ -61,9 +61,9 @@ index aeb2a40c1..6a579f9f0 100644
  #[cfg(test)]
  mod tests {
      use std::sync::atomic::{AtomicUsize, Ordering};
-@@ -559,4 +595,48 @@ mod tests {
- 
-         assert!(read_cache_topology_from(&cache_path).unwrap().is_none());
+@@ -758,4 +794,60 @@ mod tests {
+             Err(Error::CacheSizeOverflow { .. })
+         ));
      }
 +
 +    #[test]
@@ -72,10 +72,14 @@ index aeb2a40c1..6a579f9f0 100644
 +        for cpu in [0, 4] {
 +            let cache_path = temp.path().join(format!("cpu{cpu}/cache"));
 +            fs::create_dir_all(&cache_path).unwrap();
-+            write_identity(&cache_path, 0, 1, "Data", "64K");
-+            write_identity(&cache_path, 1, 1, "Instruction", "64K");
-+            write_identity(&cache_path, 2, 2, "Unified", "1024K");
-+            write_identity(&cache_path, 3, 3, "Unified", "4096K");
++            write_identity(&cache_path, 0, 1, "Data");
++            write_property(&cache_path, 0, "size", "64K");
++            write_identity(&cache_path, 1, 1, "Instruction");
++            write_property(&cache_path, 1, "size", "64K");
++            write_identity(&cache_path, 2, 2, "Unified");
++            write_property(&cache_path, 2, "size", "1024K");
++            write_identity(&cache_path, 3, 3, "Unified");
++            write_property(&cache_path, 3, "size", "4096K");
 +        }
 +
 +        let info = read_common_cache_topology_from(temp.path(), &[0, 4])
@@ -93,15 +97,23 @@ index aeb2a40c1..6a579f9f0 100644
 +        fs::create_dir_all(&cpu0_cache).unwrap();
 +        fs::create_dir_all(&cpu4_cache).unwrap();
 +
-+        write_identity(&cpu0_cache, 0, 1, "Data", "32K");
-+        write_identity(&cpu0_cache, 1, 1, "Instruction", "32K");
-+        write_identity(&cpu0_cache, 2, 2, "Unified", "256K");
-+        write_identity(&cpu0_cache, 3, 3, "Unified", "4096K");
++        write_identity(&cpu0_cache, 0, 1, "Data");
++        write_property(&cpu0_cache, 0, "size", "32K");
++        write_identity(&cpu0_cache, 1, 1, "Instruction");
++        write_property(&cpu0_cache, 1, "size", "32K");
++        write_identity(&cpu0_cache, 2, 2, "Unified");
++        write_property(&cpu0_cache, 2, "size", "256K");
++        write_identity(&cpu0_cache, 3, 3, "Unified");
++        write_property(&cpu0_cache, 3, "size", "4096K");
 +
-+        write_identity(&cpu4_cache, 0, 1, "Data", "64K");
-+        write_identity(&cpu4_cache, 1, 1, "Instruction", "64K");
-+        write_identity(&cpu4_cache, 2, 2, "Unified", "1024K");
-+        write_identity(&cpu4_cache, 3, 3, "Unified", "4096K");
++        write_identity(&cpu4_cache, 0, 1, "Data");
++        write_property(&cpu4_cache, 0, "size", "64K");
++        write_identity(&cpu4_cache, 1, 1, "Instruction");
++        write_property(&cpu4_cache, 1, "size", "64K");
++        write_identity(&cpu4_cache, 2, 2, "Unified");
++        write_property(&cpu4_cache, 2, "size", "1024K");
++        write_identity(&cpu4_cache, 3, 3, "Unified");
++        write_property(&cpu4_cache, 3, "size", "4096K");
 +
 +        assert!(
 +            read_common_cache_topology_from(temp.path(), &[0, 4])
@@ -111,7 +123,7 @@ index aeb2a40c1..6a579f9f0 100644
 +    }
  }
 diff --git a/arch/src/aarch64/fdt.rs b/arch/src/aarch64/fdt.rs
-index 8b6b4bd67..047c77ff6 100644
+index 8b6b4bd67d264199b7962c57e25f7b25b594a770..047c77ff6617161b2bf1c4f9532a32a3e9ea89d4 100644
 --- a/arch/src/aarch64/fdt.rs
 +++ b/arch/src/aarch64/fdt.rs
 @@ -26,7 +26,7 @@ use vm_fdt::{FdtWriter, FdtWriterResult};
@@ -164,7 +176,7 @@ index 8b6b4bd67..047c77ff6 100644
      let CacheTopologyInfo {
          l1_d_cache_size,
 diff --git a/arch/src/aarch64/mod.rs b/arch/src/aarch64/mod.rs
-index f70d75e77..bca4f691d 100644
+index f70d75e77063a7ac8fffeefc8d720e051bcafc0b..bca4f691d9781ce485ef17d68fb09b4a0256db3e 100644
 --- a/arch/src/aarch64/mod.rs
 +++ b/arch/src/aarch64/mod.rs
 @@ -130,6 +130,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
@@ -184,7 +196,7 @@ index f70d75e77..bca4f691d 100644
          gic_device,
          initrd,
 diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
-index 4e99026cc..a0ac72501 100644
+index 61902e1953bef1457f081802e7aaf5c2b8ecf917..6c9dc308e01c7e73a41da17aed253cdf2f45dd3b 100644
 --- a/vmm/src/cpu.rs
 +++ b/vmm/src/cpu.rs
 @@ -12,9 +12,11 @@
@@ -321,7 +333,7 @@ index 4e99026cc..a0ac72501 100644
          let CacheTopologyInfo {
              l1_d_cache_size,
              l1_d_cache_line_size,
-@@ -3723,3 +3807,54 @@ mod unit_tests {
+@@ -3726,3 +3810,54 @@ mod unit_tests {
          vcpu.set_mp_state(state).unwrap();
      }
  }
@@ -377,7 +389,7 @@ index 4e99026cc..a0ac72501 100644
 +    }
 +}
 diff --git a/vmm/src/vm.rs b/vmm/src/vm.rs
-index 8f8036127..787aabe66 100644
+index 454e0ab11224b98112812aad7f872c20b2f418c6..b06b90c4615005eef0143be7a4cdb19d86e766d9 100644
 --- a/vmm/src/vm.rs
 +++ b/vmm/src/vm.rs
 @@ -1859,8 +1859,14 @@ impl Vm {
@@ -405,7 +417,7 @@ index 8f8036127..787aabe66 100644
              device_info,
              &initramfs_config,
              &pci_space_info,
-@@ -4024,6 +4031,7 @@ mod unit_tests {
+@@ -4022,6 +4029,7 @@ mod unit_tests {
              "console=tty0",
              &[0],
              None,
@@ -414,7 +426,7 @@ index 8f8036127..787aabe66 100644
              &gic,
              &None,
 diff --git a/vmm/src/vm_config.rs b/vmm/src/vm_config.rs
-index 3cea9e18a..1b46515e2 100644
+index 3cea9e18ab630517d98206fa4eb70ce16359166d..1b46515e2c66a60ebc1aa6b160e1659f924d18e6 100644
 --- a/vmm/src/vm_config.rs
 +++ b/vmm/src/vm_config.rs
 @@ -1216,7 +1216,7 @@ impl VmConfig {
