@@ -67,11 +67,12 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression Clippy
         run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
-      - name: Retain successor diffs for repaired byte receipt
+      - name: Retain and verify exact successor diffs
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-parser.patch
           git diff --binary HEAD -- arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs vmm/src/cpu.rs vmm/src/acpi.rs > /tmp/cache-propagation.patch
           cmp linux-fieldwork/cache-errors/candidate.patch /tmp/cache-parser.patch
+          cmp linux-fieldwork/cache-errors/propagation.patch /tmp/cache-propagation.patch
           sha256sum \
             linux-fieldwork/cache-errors/candidate.patch \
             /tmp/cache-parser.patch \
