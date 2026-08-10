@@ -31,6 +31,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Focused arithmetic unit test
         run: |
+          set -o pipefail
           cargo test -p vmm --features kvm acpi::tests::test_next_table_address -- --exact 2>&1 | tee /tmp/acpi-test.log
           grep -F 'test acpi::tests::test_next_table_address ... ok' /tmp/acpi-test.log
       - name: KVM vmm compile
