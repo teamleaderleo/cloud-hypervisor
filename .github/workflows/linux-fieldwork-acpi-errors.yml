@@ -39,6 +39,8 @@ jobs:
         run: cargo check -p vmm --features kvm,tdx
       - name: aarch64 vmm compile
         run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-gnu
           cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
       - name: Retain candidate diff
