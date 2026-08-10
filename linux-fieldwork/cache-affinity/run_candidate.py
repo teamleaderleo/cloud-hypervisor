@@ -202,9 +202,10 @@ def adapt_affinity_fixtures_to_final_helpers() -> None:
         old = (
             f'write_identity(&{variable}, {index}, {level}, "{cache_type}", "{size}");'
         )
+        indent = "            " if variable == "cache_path" else "        "
         new = (
             f'write_identity(&{variable}, {index}, {level}, "{cache_type}");\n'
-            f'        write_property(&{variable}, {index}, "size", "{size}");'
+            f'{indent}write_property(&{variable}, {index}, "size", "{size}");'
         )
         count = source.count(old)
         if count != 1:
