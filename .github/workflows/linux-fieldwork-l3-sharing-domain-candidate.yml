@@ -1,0 +1,78 @@
+name: Linux Fieldwork AArch64 L3 sharing-domain candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/l3-sharing-domain
+  pull_request:
+    branches:
+      - linux-fieldwork/cache-affinity-upstream-snapshot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install AArch64 candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact prerequisites and candidate
+        run: python3 linux-fieldwork/l3-sharing-domain/run_candidate.py
+      - name: Verify one-file product scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 1
+          grep -Fx 'arch/src/aarch64/cache.rs' /tmp/changed-files.txt
+      - name: Verify L3 sharing-domain policy
+        run: python3 linux-fieldwork/l3-sharing-domain/verify_candidate.py | tee /tmp/l3-sharing-domain-candidate-policy.log
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute AArch64 L3 sharing-domain tests
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu \
+            l3_sharing_domain -- --nocapture 2>&1 | tee /tmp/l3-sharing-domain-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_common_topology_preserves_one_l3_sharing_domain ... ok' /tmp/l3-sharing-domain-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_common_topology_omits_l3_across_distinct_sharing_domains ... ok' /tmp/l3-sharing-domain-candidate-tests.log
+      - name: Full AArch64 cache regression
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests
+      - name: AArch64 arch Clippy
+        run: cargo clippy -p arch --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: AArch64 KVM vmm compile
+        run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+      - name: AArch64 MSHV vmm compile
+        run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+      - name: x86_64 KVM regression compile
+        run: cargo check -p vmm --features kvm
+      - name: Retain candidate diff
+        run: |
+          git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/l3-sharing-domain-candidate.patch
+          sha256sum /tmp/l3-sharing-domain-candidate.patch | tee /tmp/candidate-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-l3-sharing-domain-candidate
+          path: |
+            /tmp/changed-files.txt
+            /tmp/l3-sharing-domain-candidate-policy.log
+            /tmp/l3-sharing-domain-candidate-tests.log
+            /tmp/l3-sharing-domain-candidate.patch
+            /tmp/candidate-sha256.txt
+          if-no-files-found: warn
