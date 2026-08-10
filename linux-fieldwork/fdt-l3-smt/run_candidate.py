@@ -3,11 +3,11 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-AFFINITY_COMMIT = "faae0e28627e9ebcbc7df3d3173ffe46f3e4baa4"
+AFFINITY_COMMIT = "9acace966a333c9314cceedd0e6f1cdaa8812850"
 AFFINITY_RUNNER_PATH = "linux-fieldwork/cache-affinity/run_candidate.py"
-AFFINITY_RUNNER_BLOB = "f983c0d2ff94621b58275e81fb48ea7ea73fe5df"
+AFFINITY_RUNNER_BLOB = "a176dfaa2a639a301b3c4371c14952d9d87e6091"
 AFFINITY_PATCH_PATH = "linux-fieldwork/cache-affinity/candidate.patch"
-AFFINITY_PATCH_BLOB = "57542277a76d84ed4bfca58aab871ef27f090beb"
+AFFINITY_PATCH_BLOB = "75601cb2fa2a7d8f8f85dcdd9c3724c41a18d947"
 
 CANDIDATE_PATH = Path("linux-fieldwork/fdt-l3-smt/candidate.patch")
 CANDIDATE_BLOB = "239a2a7c9a7fe7031a594605f3801f2b06c53fa2"
@@ -43,8 +43,8 @@ materialize(AFFINITY_COMMIT, AFFINITY_RUNNER_PATH, runner, AFFINITY_RUNNER_BLOB)
 materialize(AFFINITY_COMMIT, AFFINITY_PATCH_PATH, Path(AFFINITY_PATCH_PATH), AFFINITY_PATCH_BLOB)
 run("python3", str(runner))
 
-# Freeze #543 as the exact prerequisite so the retained #546 product diff is
-# only arch/src/aarch64/fdt.rs.
+# Freeze #543 v2 as the exact prerequisite so the retained #546 product diff
+# remains only arch/src/aarch64/fdt.rs.
 run(
     "git",
     "add",
@@ -53,6 +53,7 @@ run(
     "arch/src/aarch64/mod.rs",
     "vmm/src/cpu.rs",
     "vmm/src/vm.rs",
+    "vmm/src/vm_config.rs",
 )
 run(
     "git",
@@ -62,7 +63,7 @@ run(
     "user.email=linux-fieldwork@example.invalid",
     "commit",
     "-m",
-    "ci: apply validated cache affinity prerequisite",
+    "ci: apply validated cache affinity v2 prerequisite",
 )
 Path(AFFINITY_PATCH_PATH).unlink()
 try:
