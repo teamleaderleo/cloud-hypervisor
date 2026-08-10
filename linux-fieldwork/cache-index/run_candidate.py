@@ -14,11 +14,11 @@ EXPECTED_BLOBS = {
 ACPI_COMMIT = "0a2f55acbd23b7f44899a69132a4236ef9240027"
 ACPI_PATH = "linux-fieldwork/acpi-errors/candidate.patch"
 ACPI_BLOB = "034cebd92cf31e3b415cdd3d205035b96cd9c1fb"
-CACHE_COMMIT = "044a728ddf5d9dbb00eba04a6df6679e84521441"
+CACHE_COMMIT = "23c8d996457eb8f489f5cfb1bf7f33c9e506e44e"
 CACHE_PARSER_PATH = "linux-fieldwork/cache-errors/candidate.patch"
 CACHE_PARSER_BLOB = "f381a777ea3343c33d2dd0bdbde067a2a91cc692"
 CACHE_PROPAGATION_PATH = "linux-fieldwork/cache-errors/propagation.patch"
-CACHE_PROPAGATION_BLOB = "9dab1cadb2d48c919fc5239c974a30e594a9a6c4"
+CACHE_PROPAGATION_BLOB = "cbfe0675d08f3b4bc1871d3825b9c67d8d5ac71c"
 
 
 def run(*args: str) -> None:
