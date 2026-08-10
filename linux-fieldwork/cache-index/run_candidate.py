@@ -265,13 +265,19 @@ source = source.replace(valid_anchor, valid_replacement, 1)
 for test_name in [
     "test_malformed_cache_size_is_error",
     "test_malformed_decimal_is_error",
-    "test_cache_property_io_error_is_error",
     "test_cache_size_overflow_is_error",
 ]:
     start = source.index(f"    fn {test_name}()")
     create = source.index("        fs::create_dir(&cache_path).unwrap();", start)
     insert = create + len("        fs::create_dir(&cache_path).unwrap();")
     source = source[:insert] + "\n        write_supported_l1_identity(&cache_path);" + source[insert:]
+
+io_test = source.index("    fn test_cache_property_io_error_is_error()")
+io_create = source.index(
+    '        fs::create_dir_all(cache_path.join("index0/size")).unwrap();', io_test
+)
+io_insert = io_create + len('        fs::create_dir_all(cache_path.join("index0/size")).unwrap();')
+source = source[:io_insert] + "\n        write_supported_l1_identity(&cache_path);" + source[io_insert:]
 
 new_tests = r'''
 
