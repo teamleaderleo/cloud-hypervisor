@@ -1,7 +1,7 @@
 # Linux Fieldwork handoff — AArch64 shared-L2 FDT/PPTT policy
 
 Updated: 2026-08-10
-State: ACTIVE BASELINE PROBE
+State: STRONG CANDIDATE / CURRENT BOUNDARY SATURATED
 Canonical source: `a1fcb9f790616ac615f66de73be540b0b20844b1`
 Branch: `linux-fieldwork/cache-sharing-pptt`
 Internal record: `teamleaderleo/linux-fieldwork#542`
@@ -9,13 +9,13 @@ Prerequisites: exact validated #8666, #8097, and #541 candidates
 
 ## TL;DR
 
-AArch64 FDT and ACPI PPTT currently consume the same host cache metadata differently when Linux reports L2 shared among multiple CPUs.
+AArch64 FDT and ACPI PPTT consumed the same host cache metadata differently when Linux reported L2 shared among multiple CPUs.
 
-FDT checks `l2_cache_shared` and avoids emitting the ambiguous per-CPU L2 relationship. PPTT ignores that flag and retains its private-L2 hierarchy. Historical Cloud Hypervisor review already contains a real ARMv8 host with L2 `shared_cpu_list=0,4,8,12`, plus the explicit rationale that migratable vCPUs make host L2 sharing difficult to map honestly.
+FDT checks `l2_cache_shared` and avoids emitting the ambiguous per-CPU L2 relationship. PPTT ignored that flag and retained its private-L2 hierarchy. Historical Cloud Hypervisor review already contains a real ARMv8 host with L2 `shared_cpu_list=0,4,8,12`, plus the explicit rationale that migratable vCPUs make host L2 sharing difficult to map honestly.
 
-The first carrier is test-only. It proves the exact stacked cache reader returns the representable L1/L2/L3 identity layout with `l2_cache_shared=true`, while guarded source assertions verify FDT takes the omission branch and PPTT ignores the flag.
+The exact one-file candidate makes PPTT follow the existing FDT caution: preserve L1, omit L2/L3 when host L2 is shared, and leave the cache reader/source metadata intact.
 
-## Real-host evidence
+## Real-host and intent evidence
 
 Cloud Hypervisor PR #5621 review reported:
 
@@ -27,46 +27,90 @@ level: 2
 
 The response explains that without vCPU affinity, guest-to-host L2 sharing is unstable because a vCPU can migrate, so the FDT code avoids claiming the shared relationship.
 
-Arm documentation also covers Armv8-A Cortex-A53/A57/A72-era cluster L2 designs, and GIC-500 supports those cores with GICv3. Cloud Hypervisor documents AArch64 servers or development boards with GICv3 as supported prerequisites.
+Arm documentation covers Armv8-A Cortex-A53/A57/A72-era cluster L2 designs, and GIC-500 supports those cores with GICv3. Cloud Hypervisor documents AArch64 servers or development boards with GICv3 as supported prerequisites.
 
-## Current source divergence
+The commit that added PPTT cache topology (`ec73733b2112d231f3ad8cf14d623002ad920cf7`) states its intended simplifying model as L2 unique per CPU and L3 shared. #542 handles the already-known host counterexample conservatively rather than inventing a guest sharing group from CPU0 metadata.
 
-FDT:
+## Reproduced baseline
+
+Baseline carrier head: `5984c730f13cc624aa4afc7c571cc1820b990286`
+Focused run/job: `31354589117` / `93351815736` — success
+Artifact: `9050195795`
+Artifact digest: `sha256:6cde182b9d479b25b7d20de6fd969c4b65316584607b157f7e3806ad091e07a0`
+Probe diff digest: `sha256:06cd0bcdbb93aacbb566194155e8bdbc692532c12bb4a63fac2c202296545171`
+
+The AArch64 qemu-user fixture proves the exact stacked cache reader returns the split-L1/unified-L2/L3 identity layout with `l2_cache_shared=true` for `shared_cpu_list=0,4,8,12`.
+
+The retained guarded policy log records:
 
 ```text
-l2_cache_size != 0 && !l2_cache_shared
+shared-l2-fdt-policy: omit-l2-and-l3
+shared-l2-pptt-policy: ignores-sharing-flag-and-keeps-l2-private-chain
 ```
 
-is required before per-CPU L2 is emitted. Shared L2 also suppresses the later L3 block.
+That is the reproduced cross-boot-mode divergence.
 
-PPTT:
+## Exact candidate policy
 
-- ignores `l2_cache_shared` while destructuring `CacheTopologyInfo`;
-- creates L2 whenever its size is nonzero;
-- links L1 descriptors to that L2 descriptor;
-- attaches L1 private resources to processor leaves.
+Product scope: `vmm/src/cpu.rs` only.
 
-ACPI descriptor reuse is valid compaction and is not the bug. The relevant semantic choice is that the L2 remains in the processor-private hierarchy even when source metadata says the host L2 is shared.
+The candidate:
 
-## Baseline plan
+1. consumes `l2_cache_shared` from `CacheTopologyInfo`;
+2. preserves all existing L1 cache description;
+3. creates L2 only when L2 size is nonzero and host L2 is not shared;
+4. creates L3 only when L3 size is nonzero and host L2 is not shared;
+5. therefore matches FDT's current L1-only behavior for ambiguous shared-L2 hosts;
+6. does not alter cache discovery, errors, fixed representable identity policy, or vCPU affinity.
 
-After exact #8666 -> #8097 -> #541 application:
+A fuller shared-cache model remains a separate future design requiring stable vCPU-to-host grouping semantics.
 
-1. inject one synthetic cache fixture with split L1, unified L2/L3, and L2 `shared_cpu_list=0,4,8,12`;
-2. execute the fixture under AArch64 qemu-user and require `l2_cache_shared=true`;
-3. guard exact FDT source showing shared L2 suppresses L2/L3;
-4. guard exact PPTT source showing `l2_cache_shared` is ignored and the L1->L2 private-resource chain remains;
-5. retain only the test diff and logs.
+## Exact product representation
 
-A green baseline proves the cross-boot-mode policy divergence. It is not a product fix.
+Validated product carrier head: `b3c66237ed59f6d7ac521d821f2f9bf138868ead`
+Stored patch: `linux-fieldwork/cache-sharing/candidate.patch`
+Patch Git blob: `bb45c3741cdebecd183cd05b769dfd56da4f80ab`
+Stored/generated patch digest: `sha256:f25ed351643d03097878b96a8899eaa0d92498adce6c1f37f3f1941f316ca1a4`
 
-## Candidate direction if reproduced
+Final focused run/job: `31354957658` / `93352819836` — success
+Artifact: `9050335649`
+Artifact digest: `sha256:fda9508233172888806dd8cc24ebd48578c026723aebdfba2641ce8d58084577`
 
-Prefer the historical migration-aware policy. The first candidate should avoid inventing a shared grouping from CPU0 host metadata.
+Product diff: `vmm/src/cpu.rs`, +8/-2.
 
-The narrowest correction is likely PPTT-only: consume `l2_cache_shared` and omit L2/L3 when it is true, preserving L1 and matching FDT's current guest-visible caution. A shared cache-reader omission would also remove L1 and would be a broader behavior change.
+## Final focused evidence
 
-A fuller shared-cache model needs stable vCPU affinity/group mapping and belongs in a separate design.
+Passed on exact stored candidate bytes after exact #8666 -> #8097 -> #541 prerequisite application and a separately committed shared-L2 test fixture:
+
+- canonical source blob guards;
+- exact prerequisite identities/application;
+- stored candidate blob identity and `git apply --check`;
+- exact one-file product scope and `git diff --check`;
+- guarded FDT/PPTT policy convergence;
+- nightly rustfmt;
+- all 12 AArch64 cache fixtures under qemu-user;
+- immediate clean cache-test rerun;
+- focused AArch64 VMM Clippy with warnings denied;
+- AArch64 KVM compile;
+- AArch64 MSHV compile;
+- x86_64 KVM regression compile;
+- regenerated one-file product diff;
+- automatic `cmp` against stored `candidate.patch`;
+- matching stored/generated SHA-256 values.
+
+The final retained policy log says:
+
+```text
+shared-l2-fdt-policy: l1-only when host L2 is shared
+shared-l2-pptt-policy: l1-only when host L2 is shared
+shared-l2-candidate-policy-converged
+```
+
+## Review recommendation
+
+Keep the PPTT-only correction. It restores parity with the existing migration-aware FDT behavior with a tiny product diff and preserves the richer cache metadata for future models.
+
+Reopen these bytes for a guarded source change, canonical competing fix, a supported shared-L2 mapping backed by stable vCPU affinity, evidence that L3 should remain exposed across an omitted shared L2, or a boot/backend counterexample.
 
 ## External-contact state
 
