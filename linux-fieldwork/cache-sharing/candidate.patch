@@ -1,0 +1,31 @@
+diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
+index 4918570..4e99026 100644
+--- a/vmm/src/cpu.rs
++++ b/vmm/src/cpu.rs
+@@ -1993,12 +1993,16 @@ impl CpuManager {
+             l3_cache_size,
+             l3_cache_line_size,
+             l3_cache_sets,
++            l2_cache_shared,
+             ..
+         } = cache_info.unwrap_or_default();
+ 
+         let mut pptt = PPTT::new(*b"CLOUDH", *b"CHPPTT  ", 1);
+ 
+-        let l3_cache_handle = if l3_cache_size != 0 {
++        // A shared host L2 cannot be mapped reliably to migratable guest vCPUs.
++        let expose_l2_l3 = !l2_cache_shared;
++
++        let l3_cache_handle = if l3_cache_size != 0 && expose_l2_l3 {
+             let l3_cache_node = CacheNodeBuilder::default()
+                 .cache_type(CacheType::Unified)
+                 .sets(l3_cache_sets)
+@@ -2010,7 +2014,7 @@ impl CpuManager {
+             None
+         };
+ 
+-        let l2_cache_handle = if l2_cache_size != 0 {
++        let l2_cache_handle = if l2_cache_size != 0 && expose_l2_l3 {
+             let l2_cache_node = CacheNodeBuilder::default()
+                 .cache_type(CacheType::Unified)
+                 .sets(l2_cache_sets)
