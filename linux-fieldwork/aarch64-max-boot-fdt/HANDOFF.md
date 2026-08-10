@@ -1,44 +1,64 @@
 # Linux Fieldwork handoff — AArch64 FDT cpu-map vs boot/max vCPUs
 
 Updated: 2026-08-10
-State: ACTIVE BASELINE PROBE
+State: STRONG / FROZEN INTERNAL CANDIDATE
 Tracker: `teamleaderleo/linux-fieldwork#547`
+Carrier: `teamleaderleo/cloud-hypervisor#12`
 Canonical source: `a1fcb9f790616ac615f66de73be540b0b20844b1`
 Prerequisites: exact frozen #543 v2 and #546 candidates
 External contact: false; none occurred
 
-## Question
+## Reproduced defect
 
-Can an accepted AArch64 configuration with `max_vcpus > boot_vcpus` cause FDT's full topology cpu-map to reference CPU phandles that have no boot-time CPU node?
+AArch64 accepted `max_vcpus > boot_vcpus` when the explicit topology product equaled max vCPUs. Boot CPU creation and AArch64 firmware tables describe the boot set, while FDT cpu-map walked the full max-sized topology.
 
-## Concrete discriminator
-
-Configuration:
+Concrete case:
 
 - boot vCPUs: 2
 - max vCPUs: 4
 - topology: `1:4:1:1`
 
-Generic validation accepts this relationship: max is at least boot, the topology parts are nonzero, AArch64 dies/package is 1, and the topology product equals max vCPUs.
+The real AArch64 config-validation path accepted it. FDT emitted CPU nodes for IDs `0,1`, while cpu-map referenced `0,1,2,3`; IDs `2,3` therefore had no CPU node. MADT and PPTT are boot-sized as well, and Cloud Hypervisor documents CPU device hotplug as x86-only.
 
-At boot, CpuManager creates only boot vCPUs and `get_mpidrs()` reflects the existing vCPU vector. FDT emits CPU nodes from that MPIDR list, so IDs 0 and 1 exist. The FDT cpu-map walks every configured topology slot, so IDs 0 through 3 are referenced. IDs 2 and 3 therefore exceed the emitted CPU-node domain.
+Baseline run/job: `31362299029` / `93373412318` — success
+Baseline artifact: `9052834792`
+Baseline artifact digest: `sha256:d7a9de4e4eacc793e5d9511fb24e42b89648d73f853fd7c1e5309b4e55c360c7`
 
-Cloud Hypervisor's hotplug documentation says CPU device hotplug is currently x86-only, so there is no documented AArch64 lifecycle that later makes those FDT references useful.
+## Frozen candidate
 
-## Baseline method
+Product scope: exactly `vmm/src/config.rs`.
 
-The carrier stacks exact #543 v2 and #546 bytes as committed local prerequisites, then adds only two test-only changes:
+The candidate preserves the existing max<boot diagnostic, then on AArch64 rejects any remaining `max_vcpus != boot_vcpus` with `Aarch64CpuHotplugUnsupported`. This aligns the accepted configuration space with AArch64's current CPU-hotplug capability and keeps FDT, MADT, and PPTT on one boot-sized CPU domain.
 
-- `vmm/src/config.rs`: AArch64-only assertion that `boot=2,max=4,topology=1:4:1:1` passes the existing validation path.
-- `arch/src/aarch64/fdt.rs`: arithmetic discriminator proving a max-sized topology map outruns a boot-sized CPU-node domain.
+Controls:
 
-A source-policy guard independently checks the production validation rules, boot-vCPU creation/MPIDR path, FDT CPU-node loop, full topology cpu-map loop, and documented x86-only CPU hotplug boundary.
+- `boot=2,max=4,topology=1:4:1:1` is rejected on AArch64;
+- `boot=max=4` with the same topology is accepted;
+- x86 configuration validation remains green.
 
-## Decision after baseline
+Exact stored patch:
 
-If reproduced, compare two candidate boundaries:
+- path: `linux-fieldwork/aarch64-max-boot-fdt/candidate.patch`
+- Git blob: `c0fdacec33e6e2080118b568ed1668be5cea492f`
+- SHA-256: `0378049238e3625690577f11168d98ee66a35084d4a68f486632dba33550e694`
+- product diff: 37 additions / 0 deletions
 
-1. reject `max_vcpus != boot_vcpus` for AArch64 while CPU hotplug remains unsupported;
-2. constrain FDT cpu-map emission to boot-present CPUs without dangling references.
+## Validation receipts
 
-Cross-check ACPI/MADT/PPTT behavior before selecting product scope.
+First full product matrix:
+
+- run/job: `31362645368` / `93374441572`
+- artifact: `9053009494`
+- artifact digest: `sha256:eb3d4c1f504957844061b87a8211c96e8d5aa0522a7c7f8399ecf6846601456f`
+
+Final exact-byte convergence:
+
+- run/job: `31363147511` / `93375931835`
+- artifact: `9053207789`
+- artifact digest: `sha256:d4983f9a1f921d121456b0da3b3298985a23d59df040f0979771c95a4f4a4672`
+
+The final read-only run applied only the exact stored one-file candidate after exact #543 v2 and #546 prerequisites, passed AArch64 validation behavior, nightly formatting, AArch64 VMM Clippy, AArch64 KVM/MSHV, x86 config-validation regression, x86 KVM compile, and literal stored/generated `cmp` plus SHA checks.
+
+## Reopen conditions
+
+Reopen if AArch64 CPU hotplug becomes supported, firmware CPU enumeration changes, or relevant canonical validation bytes move.
