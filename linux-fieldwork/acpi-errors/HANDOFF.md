@@ -3,6 +3,7 @@
 Updated: 2026-08-10
 State: CANDIDATE NARROWED, EXACT-HEAD CI PENDING
 Branch base: canonical `383773a03d8105e3fa6e2a9364b2a8e8366626b0`
+Candidate carrier head before this handoff-only receipt: `fd25b6848a7ebe676c86985533954e623db4b31e`
 Current canonical source reviewed through: `a1fcb9f790616ac615f66de73be540b0b20844b1`
 Upstream issue: `cloud-hypervisor/cloud-hypervisor#8666`
 Internal record: `teamleaderleo/linux-fieldwork#444`
@@ -61,6 +62,8 @@ The first focused CI run exposed two different owners:
 2. the focused test originally built VMM tests without a hypervisor backend, producing unrelated uninhabited-hypervisor/VFIO errors.
 
 The workflow now runs the focused test with `--features kvm`. Source review then found a second aarch64 transform bug before execution: `Gic::get_vgic()` returns `Result<Arc<Mutex<dyn Vgic>>>`, while the candidate treated it as `Option`. The narrowed transform avoids adding a new VGIC error model and only propagates mutex poisoning on that path.
+
+The transform runner has also been syntax-checked independently after the narrowing edit. Full candidate execution still requires the repository source and Cargo workspace through the hosted gate.
 
 ## Source freshness
 
