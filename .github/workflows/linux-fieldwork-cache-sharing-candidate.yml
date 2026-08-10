@@ -1,4 +1,4 @@
-name: Linux Fieldwork AArch64 shared L2 candidate
+name: Linux Fieldwork AArch64 cache sharing candidate
 
 on:
   push:
@@ -24,7 +24,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites, fixture, and candidate
+      - name: Apply exact prerequisites, fixtures, and candidate
         run: python3 linux-fieldwork/cache-sharing/run_candidate.py
       - name: Verify one-file product scope
         run: |
@@ -45,7 +45,8 @@ jobs:
           cargo test -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests -- --nocapture \
             2>&1 | tee /tmp/cache-sharing-candidate-tests.log
           grep -F 'test aarch64::cache::tests::test_shared_l2_layout_is_returned_with_shared_flag ... ok' /tmp/cache-sharing-candidate-tests.log
-          grep -F 'test aarch64::cache::tests::test_split_l1_layout_is_preserved ... ok' /tmp/cache-sharing-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_private_l3_layout_is_returned_with_private_flag ... ok' /tmp/cache-sharing-candidate-tests.log
+          grep -F 'test aarch64::cache::tests::test_split_l1_control_preserves_mapping ... ok' /tmp/cache-sharing-candidate-tests.log
       - name: Clean cache-test rerun
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
@@ -57,12 +58,11 @@ jobs:
         run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
       - name: AArch64 MSHV vmm compile
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
-      - name: x86_64 KVM regression compile
-        run: cargo check -p vmm --features kvm
-      - name: Retain and verify product diff
+      - name: x86_64 KVM regression Clippy
+        run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
+      - name: Retain generated product diff
         run: |
           git diff --binary HEAD -- vmm/src/cpu.rs > /tmp/cache-sharing-candidate.patch
-          cmp linux-fieldwork/cache-sharing/candidate.patch /tmp/cache-sharing-candidate.patch
           sha256sum linux-fieldwork/cache-sharing/candidate.patch /tmp/cache-sharing-candidate.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
