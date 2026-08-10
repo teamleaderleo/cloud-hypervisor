@@ -184,8 +184,11 @@ if actual_sha256 != CANDIDATE_SHA256:
         f"candidate patch sha256 mismatch: expected {CANDIDATE_SHA256}, found {actual_sha256}"
     )
 
-run("git", "apply", "--check", str(CANDIDATE_PATH))
-run("git", "apply", str(CANDIDATE_PATH))
+# The frozen v2 candidate was authored over an earlier cache-identity carrier.
+# Use the patch's recorded preimage blobs for a real three-way restack onto the
+# refreshed prerequisite chain; the workflow verifies resulting scope, policy,
+# tests, and stable patch identity before accepting the restack.
+run("git", "apply", "--3way", str(CANDIDATE_PATH))
 run("cargo", "+nightly", "fmt", "--all", "--", "--check")
 
 print("cache-affinity-submitted-acpi-prerequisite-applied")
@@ -193,5 +196,5 @@ print("cache-affinity-final-cache-error-prerequisite-applied")
 print("cache-affinity-final-cache-identity-prerequisite-applied")
 print("cache-affinity-final-cache-sharing-prerequisite-applied")
 print("cache-affinity-stored-candidate-verified")
-print("cache-affinity-stored-candidate-applied")
+print("cache-affinity-stored-candidate-three-way-restacked")
 print("cache-affinity-candidate-format-verified")
