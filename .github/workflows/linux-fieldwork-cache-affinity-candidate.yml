@@ -29,6 +29,7 @@ jobs:
           python3 linux-fieldwork/cache-affinity/run_candidate.py
           python3 linux-fieldwork/cache-affinity/apply_carrier_repairs.py
           python3 linux-fieldwork/cache-affinity/apply_dynamic_affinity.py
+          python3 linux-fieldwork/cache-affinity/apply_max_vcpu_affinity.py
           cargo +nightly fmt --all
       - name: Verify product scope
         run: |
@@ -66,6 +67,7 @@ jobs:
           grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_uses_fully_pinned_execution_set ... ok' /tmp/cache-affinity-vmm-tests.log
           grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_adds_default_set_for_unpinned_vcpu ... ok' /tmp/cache-affinity-vmm-tests.log
           grep -F 'test cpu::cache_affinity_tests::test_host_cpus_from_affinity_words_supports_high_cpu_ids ... ok' /tmp/cache-affinity-vmm-tests.log
+          grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_includes_hotpluggable_vcpus ... ok' /tmp/cache-affinity-vmm-tests.log
       - name: Full AArch64 cache regression
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
