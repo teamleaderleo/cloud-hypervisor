@@ -1,0 +1,74 @@
+name: Linux Fieldwork AArch64 max-vs-boot validation candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/aarch64-max-boot-fdt
+  pull_request:
+    branches:
+      - linux-fieldwork/cache-affinity-upstream-snapshot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install AArch64 candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Apply exact prerequisites and validation candidate
+        run: python3 linux-fieldwork/aarch64-max-boot-fdt/run_candidate.py
+      - name: Verify one-file product scope
+        run: |
+          git diff --check
+          git diff --name-only HEAD | tee /tmp/changed-files.txt
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 1
+          grep -Fx 'vmm/src/config.rs' /tmp/changed-files.txt
+      - name: Verify AArch64 validation policy
+        run: python3 linux-fieldwork/aarch64-max-boot-fdt/verify_candidate.py | tee /tmp/aarch64-max-boot-candidate-policy.log
+      - name: Verify nightly formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: Execute AArch64 configuration validation tests
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          set -o pipefail
+          cargo test -p vmm --features kvm --target aarch64-unknown-linux-gnu \
+            test_config_validation -- --nocapture 2>&1 | tee /tmp/aarch64-max-boot-candidate-tests.log
+          grep -F 'test config::unit_tests::test_config_validation ... ok' /tmp/aarch64-max-boot-candidate-tests.log
+      - name: AArch64 VMM Clippy
+        run: cargo clippy -p vmm --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: AArch64 KVM vmm compile
+        run: cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+      - name: AArch64 MSHV vmm compile
+        run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+      - name: x86_64 configuration validation regression
+        run: cargo test -p vmm --features kvm test_config_validation
+      - name: x86_64 KVM regression compile
+        run: cargo check -p vmm --features kvm
+      - name: Retain candidate diff
+        run: |
+          git diff --binary HEAD -- vmm/src/config.rs > /tmp/aarch64-max-boot-candidate.patch
+          sha256sum /tmp/aarch64-max-boot-candidate.patch | tee /tmp/candidate-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-aarch64-max-boot-fdt-candidate
+          path: |
+            /tmp/changed-files.txt
+            /tmp/aarch64-max-boot-candidate-policy.log
+            /tmp/aarch64-max-boot-candidate-tests.log
+            /tmp/aarch64-max-boot-candidate.patch
+            /tmp/candidate-sha256.txt
+          if-no-files-found: warn
