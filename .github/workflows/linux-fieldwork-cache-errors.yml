@@ -30,8 +30,10 @@ jobs:
         run: |
           git diff --check
           git diff --name-only HEAD | tee /tmp/changed-files.txt
-          test "$(wc -l < /tmp/changed-files.txt)" -eq 3
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 5
           grep -Fx 'arch/src/aarch64/cache.rs' /tmp/changed-files.txt
+          grep -Fx 'arch/src/aarch64/fdt.rs' /tmp/changed-files.txt
+          grep -Fx 'arch/src/aarch64/mod.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/cpu.rs' /tmp/changed-files.txt
       - name: Verify nightly formatting
@@ -68,7 +70,7 @@ jobs:
       - name: Retain successor diffs
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-parser.patch
-          git diff --binary HEAD -- vmm/src/cpu.rs vmm/src/acpi.rs > /tmp/cache-propagation.patch
+          git diff --binary HEAD -- arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs vmm/src/cpu.rs vmm/src/acpi.rs > /tmp/cache-propagation.patch
           sha256sum /tmp/cache-parser.patch /tmp/cache-propagation.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
