@@ -1,0 +1,53 @@
+name: Linux Fieldwork cache affinity freeze
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/cache-affinity-selection
+
+permissions:
+  contents: write
+
+jobs:
+  freeze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: linux-fieldwork/cache-affinity-selection
+          fetch-depth: 1
+      - name: Install candidate toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+          rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Generate and freeze exact proven bytes
+        run: |
+          ORIGINAL_HEAD=$(git rev-parse HEAD)
+          python3 linux-fieldwork/cache-affinity/run_candidate.py
+          python3 linux-fieldwork/cache-affinity/apply_carrier_repairs.py
+          python3 linux-fieldwork/cache-affinity/apply_dynamic_affinity.py
+          python3 linux-fieldwork/cache-affinity/apply_max_vcpu_affinity.py
+          cargo +nightly fmt --all
+          git diff --binary HEAD -- \
+            arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs \
+            vmm/src/cpu.rs vmm/src/vm.rs > /tmp/cache-affinity-candidate.patch
+          test "$(git hash-object /tmp/cache-affinity-candidate.patch)" = \
+            57542277a76d84ed4bfca58aab871ef27f090beb
+          test "$(sha256sum /tmp/cache-affinity-candidate.patch | cut -d' ' -f1)" = \
+            8d5338bfa915420f981802929dea8bf6aad11da77c75f7c602cd73e5aca6b19c
+          git reset --hard "$ORIGINAL_HEAD"
+          cp /tmp/cache-affinity-candidate.patch linux-fieldwork/cache-affinity/candidate.patch
+          if git diff --quiet -- linux-fieldwork/cache-affinity/candidate.patch; then
+            echo cache-affinity-candidate-already-exact
+            exit 0
+          fi
+          git config user.name 'Linux Fieldwork CI'
+          git config user.email 'linux-fieldwork@example.invalid'
+          git add linux-fieldwork/cache-affinity/candidate.patch
+          test "$(git diff --cached --name-only)" = \
+            'linux-fieldwork/cache-affinity/candidate.patch'
+          git commit -m 'linux-fieldwork: store exact cache affinity candidate bytes'
+          git push origin HEAD:linux-fieldwork/cache-affinity-selection
