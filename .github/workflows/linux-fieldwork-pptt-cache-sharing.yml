@@ -24,7 +24,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and generate candidate
+      - name: Apply exact prerequisites and exact candidate
         run: python3 linux-fieldwork/pptt-cache-sharing/run_candidate.py
       - name: Verify one-file product scope
         run: |
@@ -58,10 +58,13 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression Clippy
         run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
-      - name: Retain generated product diff
+      - name: Retain and verify exact product diff
         run: |
           git diff --binary HEAD -- vmm/src/cpu.rs > /tmp/pptt-cache-sharing.patch
-          sha256sum /tmp/pptt-cache-sharing.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/pptt-cache-sharing/candidate.patch /tmp/pptt-cache-sharing.patch
+          echo '90cbf704b2e50c814c4f90d46d8aaa4b43cd69958ea8810883e7624005e502fa  linux-fieldwork/pptt-cache-sharing/candidate.patch' | sha256sum -c -
+          echo '90cbf704b2e50c814c4f90d46d8aaa4b43cd69958ea8810883e7624005e502fa  /tmp/pptt-cache-sharing.patch' | sha256sum -c -
+          sha256sum linux-fieldwork/pptt-cache-sharing/candidate.patch /tmp/pptt-cache-sharing.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
