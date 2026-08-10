@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - name: Install AArch64 candidate toolchain
         run: |
           sudo apt-get update
@@ -64,11 +66,9 @@ jobs:
         run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
       - name: Retain and verify exact candidate diff
         run: |
-          git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
-          cmp linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch
-          echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  linux-fieldwork/cache-index/candidate.patch' | sha256sum -c -
-          echo 'c3c0b19e8025fa8b1f90d9b2378165676f877fe2572c52b62e3ab1871e13e1e9  /tmp/cache-index-candidate.patch' | sha256sum -c -
+          git diff --binary --full-index HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-index-candidate.patch
           sha256sum linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/cache-index/candidate.patch /tmp/cache-index-candidate.patch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
