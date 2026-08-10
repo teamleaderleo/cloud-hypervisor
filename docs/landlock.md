@@ -62,10 +62,13 @@ Landlock can also be enabled during `vm.create` request by passing a config like
 }
 ```
 
-### Multi-file disk formats (VMDK)
+### Multi-file disk formats
 
-For most block backends (raw, qcow2, VHD) including existing VMDK, landlock
-grants access to the `--disk path=` path value.
+For ordinary raw, QCOW2 without backing files, VHD, and single-file VMDK
+images, Landlock grants access to the `--disk path=` path value. Disk formats
+that reference additional host files need rules for those files as well.
+
+#### Flat VMDK extents
 
 For a Flat VMDK, its `path=` points at a small text descriptor whose
 data lives in one or more separate extent files. Granting only the descriptor
@@ -85,6 +88,26 @@ layer resides under `/var/lib/containerd` should add that path:
 
 ```
 --landlock-rules path="/var/lib/containerd",access="rw"
+```
+
+#### QCOW2 backing files
+
+When a QCOW2 disk is configured with `backing_files=on`, its metadata can
+reference a separate backing image. Cloud Hypervisor automatically grants the
+configured overlay path, but it does not add the backing path to the Landlock
+ruleset.
+
+The management stack already needs to validate QCOW2 backing-file paths before
+using `backing_files=on`. It must also grant the validated backing files, or a
+validated directory containing them, through `--landlock-rules` (or the
+`landlock_rules` API field). Apply the same rule recursively when a backing
+image has another backing image.
+
+For example:
+
+```
+--disk path="/var/lib/vms/overlay.qcow2",backing_files=on \
+--landlock-rules path="/var/lib/vm-images/base.raw",access=r
 ```
 
 
@@ -117,7 +140,7 @@ To enable Landlock with hotplug support:
 	--memory size=1024M \
 	--net "tap=,mac=,ip=,mask=" \
 	--landlock \
-	--landlock-rules path="/path/to/hotplug1",access="rw" path="/path/to/hotplug2",access="rw"
+	--landlock-rules path="/path/to/hotplug1",access=rw path="/path/to/hotplug2",access=rw
 
 ./ch-remote --api-socket /tmpXXXX/ch.socket \
 	add-disk "path=/path/to/hotplug/blk.raw"
