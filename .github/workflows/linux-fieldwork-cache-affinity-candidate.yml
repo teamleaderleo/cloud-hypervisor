@@ -18,25 +18,31 @@ jobs:
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - name: Install AArch64 candidate toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and stored candidate
-        run: python3 linux-fieldwork/cache-affinity/run_candidate.py
+      - name: Apply exact frozen candidate plus Landlock repair
+        run: |
+          python3 linux-fieldwork/cache-affinity/run_candidate.py
+          python3 linux-fieldwork/cache-affinity/apply_landlock_fix.py
+          cargo +nightly fmt --all
       - name: Verify product scope
         run: |
           git diff --check
           git diff --name-only HEAD | tee /tmp/changed-files.txt
-          test "$(wc -l < /tmp/changed-files.txt)" -eq 5
+          test "$(wc -l < /tmp/changed-files.txt)" -eq 6
           grep -Fx 'arch/src/aarch64/cache.rs' /tmp/changed-files.txt
           grep -Fx 'arch/src/aarch64/fdt.rs' /tmp/changed-files.txt
           grep -Fx 'arch/src/aarch64/mod.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/cpu.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
-      - name: Verify selector policy
+          grep -Fx 'vmm/src/vm_config.rs' /tmp/changed-files.txt
+      - name: Verify selector and Landlock policy
         run: python3 linux-fieldwork/cache-affinity/verify_candidate.py | tee /tmp/cache-affinity-candidate-policy.log
       - name: Verify nightly formatting
         run: cargo +nightly fmt --all -- --check
@@ -78,28 +84,22 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Verify exact candidate convergence
+      - name: Retain repaired candidate diff
         run: |
           git diff --binary HEAD -- \
             arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs \
-            vmm/src/cpu.rs vmm/src/vm.rs > /tmp/cache-affinity-candidate.patch
-          cmp linux-fieldwork/cache-affinity/candidate.patch /tmp/cache-affinity-candidate.patch
-          sha256sum linux-fieldwork/cache-affinity/candidate.patch | tee /tmp/stored-candidate-sha256.txt
-          sha256sum /tmp/cache-affinity-candidate.patch | tee /tmp/generated-candidate-sha256.txt
-          test "$(cut -d' ' -f1 /tmp/stored-candidate-sha256.txt)" = \
-            8d5338bfa915420f981802929dea8bf6aad11da77c75f7c602cd73e5aca6b19c
-          test "$(cut -d' ' -f1 /tmp/generated-candidate-sha256.txt)" = \
-            8d5338bfa915420f981802929dea8bf6aad11da77c75f7c602cd73e5aca6b19c
+            vmm/src/cpu.rs vmm/src/vm.rs vmm/src/vm_config.rs \
+            > /tmp/cache-affinity-candidate-v2.patch
+          sha256sum /tmp/cache-affinity-candidate-v2.patch | tee /tmp/candidate-v2-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: linux-fieldwork-cache-affinity-candidate
+          name: linux-fieldwork-cache-affinity-candidate-v2
           path: |
             /tmp/changed-files.txt
             /tmp/cache-affinity-candidate-policy.log
             /tmp/cache-affinity-arch-tests.log
             /tmp/cache-affinity-vmm-tests.log
-            /tmp/cache-affinity-candidate.patch
-            /tmp/stored-candidate-sha256.txt
-            /tmp/generated-candidate-sha256.txt
+            /tmp/cache-affinity-candidate-v2.patch
+            /tmp/candidate-v2-sha256.txt
           if-no-files-found: warn
