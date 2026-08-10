@@ -18,6 +18,29 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Preflight stored patch portability from clean canonical source
+        run: |
+          set -euxo pipefail
+          sha256sum linux-fieldwork/cache-errors/candidate.patch linux-fieldwork/cache-errors/propagation.patch
+          git apply --numstat linux-fieldwork/cache-errors/candidate.patch
+          git apply --numstat linux-fieldwork/cache-errors/propagation.patch
+
+          git fetch --no-tags --depth=100 origin linux-fieldwork/acpi-error-propagation
+          rm -rf /tmp/cache-errors-preflight
+          git worktree add --detach /tmp/cache-errors-preflight a1fcb9f790616ac615f66de73be540b0b20844b1
+          git show 0a2f55acbd23b7f44899a69132a4236ef9240027:linux-fieldwork/acpi-errors/candidate.patch > /tmp/acpi.patch
+          cp linux-fieldwork/cache-errors/candidate.patch /tmp/cache-parser-stored.patch
+          cp linux-fieldwork/cache-errors/propagation.patch /tmp/cache-propagation-stored.patch
+          (
+            cd /tmp/cache-errors-preflight
+            git apply --check /tmp/acpi.patch
+            git apply /tmp/acpi.patch
+            git apply --check /tmp/cache-parser-stored.patch
+            git apply /tmp/cache-parser-stored.patch
+            git apply --check /tmp/cache-propagation-stored.patch
+          )
       - name: Install candidate toolchains
         run: |
           sudo apt-get update
