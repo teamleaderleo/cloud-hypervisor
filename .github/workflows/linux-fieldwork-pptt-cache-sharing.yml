@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - linux-fieldwork/pptt-cache-sharing
+  pull_request:
+    branches:
+      - linux-fieldwork/pptt-cache-sharing-upstream-snapshot
   workflow_dispatch:
 
 permissions:
