@@ -72,13 +72,7 @@ run(
 )
 
 candidate_dir = Path(__file__).parent
-for patch_name in [
-    "candidate.patch",
-    "format-fix.patch",
-    "clippy-fix.patch",
-    "propagation.patch",
-    "fdt-propagation.patch",
-]:
+for patch_name in ["candidate.patch", "propagation.patch"]:
     patch_path = candidate_dir / patch_name
     run("git", "apply", "--check", str(patch_path))
     run("git", "apply", str(patch_path))
