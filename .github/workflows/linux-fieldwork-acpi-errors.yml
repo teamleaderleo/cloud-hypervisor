@@ -30,7 +30,7 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
       - name: Focused arithmetic unit test
-        run: cargo test -p vmm --features kvm test_next_table_address_overflow
+        run: cargo test -p vmm --features kvm test_next_table_address
       - name: KVM vmm compile
         run: cargo check -p vmm --features kvm
       - name: fw_cfg vmm compile
