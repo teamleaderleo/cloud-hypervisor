@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - linux-fieldwork/cache-runtime-errors
+  pull_request:
+    branches:
+      - linux-fieldwork/cache-error-upstream-snapshot
   workflow_dispatch:
 
 permissions:
