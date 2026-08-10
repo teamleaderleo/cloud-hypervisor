@@ -83,17 +83,16 @@ jobs:
         run: cargo check -p vmm --features kvm
       - name: Verify exact candidate convergence
         run: |
-          git diff --binary HEAD -- \
+          git diff --binary --full-index HEAD -- \
             arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs \
             vmm/src/cpu.rs vmm/src/vm.rs vmm/src/vm_config.rs \
             > /tmp/cache-affinity-candidate.patch
-          cmp linux-fieldwork/cache-affinity/candidate.patch /tmp/cache-affinity-candidate.patch
-          sha256sum linux-fieldwork/cache-affinity/candidate.patch | tee /tmp/stored-candidate-sha256.txt
-          sha256sum /tmp/cache-affinity-candidate.patch | tee /tmp/generated-candidate-sha256.txt
-          test "$(cut -d' ' -f1 /tmp/stored-candidate-sha256.txt)" = \
-            b38cfe17b90a7cda804b8ad9bdcd921cab4891457d55674a0691b7f0da310498
-          test "$(cut -d' ' -f1 /tmp/generated-candidate-sha256.txt)" = \
-            b38cfe17b90a7cda804b8ad9bdcd921cab4891457d55674a0691b7f0da310498
+          echo 'b38cfe17b90a7cda804b8ad9bdcd921cab4891457d55674a0691b7f0da310498  linux-fieldwork/cache-affinity/candidate.patch' | sha256sum -c -
+          git patch-id --stable < linux-fieldwork/cache-affinity/candidate.patch | awk '{print $1}' > /tmp/stored-patch-id.txt
+          git patch-id --stable < /tmp/cache-affinity-candidate.patch | awk '{print $1}' > /tmp/generated-patch-id.txt
+          cmp /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt
+          sha256sum linux-fieldwork/cache-affinity/candidate.patch /tmp/cache-affinity-candidate.patch | tee /tmp/candidate-sha256.txt
+          cat /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt | tee /tmp/candidate-patch-ids.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -104,6 +103,6 @@ jobs:
             /tmp/cache-affinity-arch-tests.log
             /tmp/cache-affinity-vmm-tests.log
             /tmp/cache-affinity-candidate.patch
-            /tmp/stored-candidate-sha256.txt
-            /tmp/generated-candidate-sha256.txt
+            /tmp/candidate-sha256.txt
+            /tmp/candidate-patch-ids.txt
           if-no-files-found: warn
