@@ -22,6 +22,8 @@ CACHE_PROPAGATION_BLOB = "9dab1cadb2d48c919fc5239c974a30e594a9a6c4"
 INDEX_COMMIT = "7713a59e21c48262843da100087454dae3c0772d"
 INDEX_PATH = "linux-fieldwork/cache-index/candidate.patch"
 INDEX_BLOB = "4550e55faba24d0c1ffc9f7be7a11596d5866b8a"
+CANDIDATE_PATH = "linux-fieldwork/cache-sharing/candidate.patch"
+CANDIDATE_BLOB = "bb45c3741cdebecd183cd05b769dfd56da4f80ab"
 
 
 def run(*args: str) -> None:
@@ -121,7 +123,7 @@ run(
     "ci: apply validated cache index prerequisite",
 )
 
-# Commit the exact shared-L2 runtime fixture before applying product code so the
+# Commit the shared-L2 runtime fixture before applying product code so the
 # retained product diff remains vmm/src/cpu.rs only.
 cache_file = Path("arch/src/aarch64/cache.rs")
 cache_source = cache_file.read_text()
@@ -161,43 +163,16 @@ run(
     "ci: add shared L2 cache fixture",
 )
 
-cpu_file = Path("vmm/src/cpu.rs")
-cpu = cpu_file.read_text()
-
-destructure = '''            l3_cache_line_size,
-            l3_cache_sets,
-            ..
-'''
-replacement = '''            l3_cache_line_size,
-            l3_cache_sets,
-            l2_cache_shared,
-            ..
-'''
-if destructure not in cpu:
-    raise RuntimeError("PPTT cache destructuring anchor changed")
-cpu = cpu.replace(destructure, replacement, 1)
-
-l3 = '''        let l3_cache_handle = if l3_cache_size != 0 {
-'''
-l3_replacement = '''        // A shared host L2 cannot be mapped reliably to migratable guest vCPUs.
-        let expose_l2_l3 = !l2_cache_shared;
-
-        let l3_cache_handle = if l3_cache_size != 0 && expose_l2_l3 {
-'''
-if l3 not in cpu:
-    raise RuntimeError("PPTT L3 creation anchor changed")
-cpu = cpu.replace(l3, l3_replacement, 1)
-
-l2 = '''        let l2_cache_handle = if l2_cache_size != 0 {
-'''
-l2_replacement = '''        let l2_cache_handle = if l2_cache_size != 0 && expose_l2_l3 {
-'''
-if l2 not in cpu:
-    raise RuntimeError("PPTT L2 creation anchor changed")
-cpu = cpu.replace(l2, l2_replacement, 1)
-
-cpu_file.write_text(cpu)
-run("cargo", "+nightly", "fmt", "--all")
+candidate = Path(CANDIDATE_PATH)
+actual_candidate_blob = output("git", "hash-object", str(candidate))
+if actual_candidate_blob != CANDIDATE_BLOB:
+    raise RuntimeError(
+        f"candidate patch identity mismatch: expected {CANDIDATE_BLOB}, found {actual_candidate_blob}"
+    )
+run("git", "apply", "--check", str(candidate))
+run("git", "apply", str(candidate))
+run("cargo", "+nightly", "fmt", "--all", "--", "--check")
 print("cache-sharing-prerequisites-applied")
 print("cache-sharing-fixture-committed")
 print("cache-sharing-candidate-applied")
+print("cache-sharing-candidate-format-verified")
