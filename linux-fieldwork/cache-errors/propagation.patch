@@ -74,10 +74,9 @@ index 68fc175..5520edd 100644
  use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
  use zerocopy::{FromBytes, Immutable, IntoBytes};
  
--use crate::cpu::CpuManager;
+ use crate::cpu::CpuManager;
 +#[cfg(target_arch = "aarch64")]
 +use crate::cpu::Error as CpuError;
-+use crate::cpu::CpuManager;
  use crate::device_manager::DeviceManager;
  use crate::memory_manager::MemoryManager;
  use crate::pci_segment::PciSegment;
