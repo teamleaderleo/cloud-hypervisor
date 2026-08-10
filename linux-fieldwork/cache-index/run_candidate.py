@@ -11,14 +11,15 @@ EXPECTED_BLOBS = {
     "vmm/src/vm.rs": "12a9fe0ad7068df7b26082b32de65d6f54b33d04",
 }
 
-ACPI_COMMIT = "0a2f55acbd23b7f44899a69132a4236ef9240027"
-ACPI_PATH = "linux-fieldwork/acpi-errors/candidate.patch"
-ACPI_BLOB = "034cebd92cf31e3b415cdd3d205035b96cd9c1fb"
-CACHE_COMMIT = "23c8d996457eb8f489f5cfb1bf7f33c9e506e44e"
+CANONICAL_BASE = "a1fcb9f790616ac615f66de73be540b0b20844b1"
+ACPI_BRANCH = "fix/8666-acpi-errors"
+ACPI_COMMIT = "e9c86bacee14a2fd6fe871dc678c6b3f1ac4012a"
+CACHE_BRANCH = "linux-fieldwork/cache-runtime-errors"
+CACHE_COMMIT = "a696e285eaece00335e106acdfb5a651ccb2261f"
 CACHE_PARSER_PATH = "linux-fieldwork/cache-errors/candidate.patch"
-CACHE_PARSER_BLOB = "f381a777ea3343c33d2dd0bdbde067a2a91cc692"
+CACHE_PARSER_BLOB = "64dc6a19b132aad66b1adaccf9aaa1853a734d7c"
 CACHE_PROPAGATION_PATH = "linux-fieldwork/cache-errors/propagation.patch"
-CACHE_PROPAGATION_BLOB = "cbfe0675d08f3b4bc1871d3825b9c67d8d5ac71c"
+CACHE_PROPAGATION_BLOB = "9e175e73a26530d8dd5584cb15ae3ab4b36df196"
 CANDIDATE_BLOB = "b6e21517377995f35ff6984ffc29f06a21db06b7"
 
 
@@ -51,10 +52,39 @@ for path, expected in EXPECTED_BLOBS.items():
     if actual != expected:
         raise RuntimeError(f"{path}: expected source blob {expected}, found {actual}")
 
-run("git", "fetch", "--no-tags", "--depth=100", "origin", "linux-fieldwork/acpi-error-propagation")
-run("git", "fetch", "--no-tags", "--depth=100", "origin", "linux-fieldwork/cache-runtime-errors")
+run("git", "fetch", "--no-tags", "--depth=100", "origin", ACPI_BRANCH)
+if output("git", "rev-parse", "FETCH_HEAD") != ACPI_COMMIT:
+    raise RuntimeError("submitted ACPI prerequisite branch moved")
 
-acpi = materialize(ACPI_COMMIT, ACPI_PATH, "/tmp/acpi.patch", ACPI_BLOB)
+acpi_files = output(
+    "git",
+    "diff",
+    "--name-only",
+    CANONICAL_BASE,
+    ACPI_COMMIT,
+    "--",
+    "vmm/src/acpi.rs",
+    "vmm/src/vm.rs",
+).splitlines()
+if acpi_files != ["vmm/src/acpi.rs", "vmm/src/vm.rs"]:
+    raise RuntimeError(f"unexpected ACPI prerequisite scope: {acpi_files}")
+
+acpi_bytes = subprocess.run(
+    [
+        "git",
+        "diff",
+        "--binary",
+        CANONICAL_BASE,
+        ACPI_COMMIT,
+        "--",
+        "vmm/src/acpi.rs",
+        "vmm/src/vm.rs",
+    ],
+    check=True,
+    capture_output=True,
+).stdout
+acpi = Path("/tmp/acpi.patch")
+acpi.write_bytes(acpi_bytes)
 run("git", "apply", "--check", str(acpi))
 run("git", "apply", str(acpi))
 run("cargo", "+nightly", "fmt", "--all", "--", "--check")
@@ -67,8 +97,12 @@ run(
     "user.email=linux-fieldwork@example.invalid",
     "commit",
     "-m",
-    "ci: apply validated ACPI prerequisite",
+    "ci: apply submitted ACPI prerequisite",
 )
+
+run("git", "fetch", "--no-tags", "--depth=100", "origin", CACHE_BRANCH)
+if output("git", "rev-parse", "FETCH_HEAD") != CACHE_COMMIT:
+    raise RuntimeError("cache-error prerequisite branch moved")
 
 for source_path, destination, expected_blob in [
     (CACHE_PARSER_PATH, "/tmp/cache-parser.patch", CACHE_PARSER_BLOB),
@@ -108,5 +142,6 @@ if actual_candidate_blob != CANDIDATE_BLOB:
 run("git", "apply", "--check", str(candidate))
 run("git", "apply", str(candidate))
 run("cargo", "+nightly", "fmt", "--all", "--", "--check")
-print("cache-index-prerequisites-applied")
+print("cache-index-submitted-acpi-prerequisite-applied")
+print("cache-index-final-cache-error-prerequisite-applied")
 print("cache-index-candidate-applied")
