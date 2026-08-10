@@ -1,5 +1,5 @@
 diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
-index 9200c59..c2bfbc0 100644
+index 9200c59627beba0e6366b5105d2fe51a312efaed..c2bfbc0202710a91a9fd6f6e120d92c3f1c41d33 100644
 --- a/arch/src/aarch64/cache.rs
 +++ b/arch/src/aarch64/cache.rs
 @@ -6,10 +6,46 @@
@@ -467,4 +467,4 @@ index 9200c59..c2bfbc0 100644
 +            Err(Error::CacheSizeOverflow { .. })
 +        ));
 +    }
- }
++}
