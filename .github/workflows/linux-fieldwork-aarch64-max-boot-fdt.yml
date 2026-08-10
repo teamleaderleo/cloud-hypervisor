@@ -47,7 +47,7 @@ jobs:
           set -o pipefail
           cargo test -p vmm --features kvm --target aarch64-unknown-linux-gnu \
             test_config_validation -- --nocapture 2>&1 | tee /tmp/aarch64-max-boot-config-tests.log
-          grep -F 'test config::tests::test_config_validation ... ok' /tmp/aarch64-max-boot-config-tests.log
+          grep -F 'test config::unit_tests::test_config_validation ... ok' /tmp/aarch64-max-boot-config-tests.log
       - name: Execute AArch64 FDT cpu-map domain discriminator
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
