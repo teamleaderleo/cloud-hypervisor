@@ -27,10 +27,7 @@ jobs:
       - name: Apply exact prerequisites and candidate
         run: |
           python3 linux-fieldwork/cache-affinity/run_candidate.py
-          git apply --check linux-fieldwork/cache-affinity/fdt-test-call.patch
-          git apply linux-fieldwork/cache-affinity/fdt-test-call.patch
-          git apply --check linux-fieldwork/cache-affinity/clippy-fix.patch
-          git apply linux-fieldwork/cache-affinity/clippy-fix.patch
+          python3 linux-fieldwork/cache-affinity/apply_carrier_repairs.py
           python3 linux-fieldwork/cache-affinity/apply_dynamic_affinity.py
           cargo +nightly fmt --all
       - name: Verify product scope
