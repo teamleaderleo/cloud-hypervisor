@@ -1,14 +1,16 @@
 diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
+index 9200c59..c2bfbc0 100644
 --- a/arch/src/aarch64/cache.rs
 +++ b/arch/src/aarch64/cache.rs
-@@ -7,9 +7,46 @@
+@@ -6,10 +6,46 @@
+ // Use of this source code is governed by a BSD-style license that can be
  // found in the THIRD-PARTY file.
  
- use std::fs;
+-use std::fs;
 -use std::path::Path;
 +use std::num::ParseIntError;
 +use std::path::{Path, PathBuf};
-+use std::{io, result};
++use std::{fs, io, result};
  
  use log::warn;
 +use thiserror::Error;
@@ -49,7 +51,7 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
  
  #[derive(Copy, Clone)]
  pub enum CacheLevel {
-@@ -23,107 +60,117 @@
+@@ -23,107 +59,109 @@ pub enum CacheLevel {
      L3 = 3,
  }
  
@@ -138,11 +140,7 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 +    get_cache_size_from(Path::new(CACHE_SYSFS_PATH), cache_level)
 +}
 +
-+fn get_cache_u32_from(
-+    cache_path: &Path,
-+    cache_level: CacheLevel,
-+    property: &str,
-+) -> Result<u32> {
++fn get_cache_u32_from(cache_path: &Path, cache_level: CacheLevel, property: &str) -> Result<u32> {
 +    let path = cache_property_path(cache_path, cache_level, property);
 +    let Some(src) = read_optional_property(&path)? else {
 +        return Ok(0);
@@ -198,29 +196,11 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 -        0
 -    }
 +pub fn get_cache_number_of_sets(cache_level: CacheLevel) -> Result<u32> {
-+    get_cache_u32_from(
-+        Path::new(CACHE_SYSFS_PATH),
-+        cache_level,
-+        "number_of_sets",
-+    )
-+}
-+
-+fn get_cache_shared_from(cache_path: &Path, cache_level: CacheLevel) -> Result<bool> {
-+    if matches!(cache_level, CacheLevel::L1D | CacheLevel::L1I) {
-+        return Ok(false);
-+    }
-+
-+    let path = cache_property_path(cache_path, cache_level, "shared_cpu_list");
-+    let Some(src) = read_optional_property(&path)? else {
-+        return Ok(false);
-+    };
-+    let src = src.trim();
-+
-+    Ok(!src.is_empty() && (src.contains('-') || src.contains(',')))
++    get_cache_u32_from(Path::new(CACHE_SYSFS_PATH), cache_level, "number_of_sets")
  }
  
- /// NOTE: shared_cpu_list file directory example,
- /// "/sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list".
+-/// NOTE: shared_cpu_list file directory example,
+-/// "/sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list".
 -pub fn get_cache_shared(cache_level: CacheLevel) -> bool {
 -    let mut file_directory: String = "/sys/devices/system/cpu/cpu0/cache".to_string();
 -    let mut result = true;
@@ -229,12 +209,20 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 -        CacheLevel::L1D | CacheLevel::L1I => result = false,
 -        CacheLevel::L2 => file_directory += "/index2/shared_cpu_list",
 -        CacheLevel::L3 => file_directory += "/index3/shared_cpu_list",
--    }
--
++fn get_cache_shared_from(cache_path: &Path, cache_level: CacheLevel) -> Result<bool> {
++    if matches!(cache_level, CacheLevel::L1D | CacheLevel::L1I) {
++        return Ok(false);
+     }
+ 
 -    if !result {
 -        return false;
 -    }
--
++    let path = cache_property_path(cache_path, cache_level, "shared_cpu_list");
++    let Some(src) = read_optional_property(&path)? else {
++        return Ok(false);
++    };
++    let src = src.trim();
+ 
 -    let file_path = Path::new(&file_directory);
 -    if file_path.exists() {
 -        let src = fs::read_to_string(file_directory).expect("File not exists or file corrupted.");
@@ -247,14 +235,18 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 -    } else {
 -        result = false;
 -    }
--
++    Ok(!src.is_empty() && (src.contains('-') || src.contains(',')))
++}
+ 
 -    result
++/// NOTE: shared_cpu_list file directory example,
++/// "/sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list".
 +pub fn get_cache_shared(cache_level: CacheLevel) -> Result<bool> {
 +    get_cache_shared_from(Path::new(CACHE_SYSFS_PATH), cache_level)
  }
  
  #[derive(Default, Copy, Clone, Debug)]
-@@ -148,41 +195,207 @@
+@@ -148,41 +186,200 @@ pub struct CacheTopologyInfo {
      pub l3_cache_shared: bool,
  }
  
@@ -283,18 +275,6 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 -        l1_d_cache_size: get_cache_size(CacheLevel::L1D),
 -        l1_d_cache_line_size: get_cache_coherency_line_size(CacheLevel::L1D),
 -        l1_d_cache_sets: get_cache_number_of_sets(CacheLevel::L1D),
--
--        l1_i_cache_size: get_cache_size(CacheLevel::L1I),
--        l1_i_cache_line_size: get_cache_coherency_line_size(CacheLevel::L1I),
--        l1_i_cache_sets: get_cache_number_of_sets(CacheLevel::L1I),
--
--        l2_cache_size: get_cache_size(CacheLevel::L2),
--        l2_cache_line_size: get_cache_coherency_line_size(CacheLevel::L2),
--        l2_cache_sets: get_cache_number_of_sets(CacheLevel::L2),
--
--        l3_cache_size: get_cache_size(CacheLevel::L3),
--        l3_cache_line_size: get_cache_coherency_line_size(CacheLevel::L3),
--        l3_cache_sets: get_cache_number_of_sets(CacheLevel::L3),
 +        l1_d_cache_size: get_cache_size_from(cache_path, CacheLevel::L1D)?,
 +        l1_d_cache_line_size: get_cache_u32_from(
 +            cache_path,
@@ -302,7 +282,10 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 +            "coherency_line_size",
 +        )?,
 +        l1_d_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L1D, "number_of_sets")?,
-+
+ 
+-        l1_i_cache_size: get_cache_size(CacheLevel::L1I),
+-        l1_i_cache_line_size: get_cache_coherency_line_size(CacheLevel::L1I),
+-        l1_i_cache_sets: get_cache_number_of_sets(CacheLevel::L1I),
 +        l1_i_cache_size: get_cache_size_from(cache_path, CacheLevel::L1I)?,
 +        l1_i_cache_line_size: get_cache_u32_from(
 +            cache_path,
@@ -310,21 +293,19 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 +            "coherency_line_size",
 +        )?,
 +        l1_i_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L1I, "number_of_sets")?,
-+
+ 
+-        l2_cache_size: get_cache_size(CacheLevel::L2),
+-        l2_cache_line_size: get_cache_coherency_line_size(CacheLevel::L2),
+-        l2_cache_sets: get_cache_number_of_sets(CacheLevel::L2),
 +        l2_cache_size: get_cache_size_from(cache_path, CacheLevel::L2)?,
-+        l2_cache_line_size: get_cache_u32_from(
-+            cache_path,
-+            CacheLevel::L2,
-+            "coherency_line_size",
-+        )?,
++        l2_cache_line_size: get_cache_u32_from(cache_path, CacheLevel::L2, "coherency_line_size")?,
 +        l2_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L2, "number_of_sets")?,
-+
+ 
+-        l3_cache_size: get_cache_size(CacheLevel::L3),
+-        l3_cache_line_size: get_cache_coherency_line_size(CacheLevel::L3),
+-        l3_cache_sets: get_cache_number_of_sets(CacheLevel::L3),
 +        l3_cache_size: get_cache_size_from(cache_path, CacheLevel::L3)?,
-+        l3_cache_line_size: get_cache_u32_from(
-+            cache_path,
-+            CacheLevel::L3,
-+            "coherency_line_size",
-+        )?,
++        l3_cache_line_size: get_cache_u32_from(cache_path, CacheLevel::L3, "coherency_line_size")?,
 +        l3_cache_sets: get_cache_u32_from(cache_path, CacheLevel::L3, "number_of_sets")?,
  
          l2_cache_shared: false,
@@ -337,13 +318,10 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
      }
      if info.l3_cache_size != 0 {
 -        info.l3_cache_shared = get_cache_shared(CacheLevel::L3);
--    }
--
--    Some(info)
--}
 +        info.l3_cache_shared = get_cache_shared_from(cache_path, CacheLevel::L3)?;
-+    }
-+
+     }
+ 
+-    Some(info)
 +    Ok(Some(info))
 +}
 +
@@ -355,6 +333,7 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 +#[cfg(test)]
 +mod tests {
 +    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::{env, process};
 +
 +    use super::*;
 +
@@ -364,9 +343,9 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 +
 +    impl TestDir {
 +        fn new() -> Self {
-+            let path = std::env::temp_dir().join(format!(
++            let path = env::temp_dir().join(format!(
 +                "cloud-hypervisor-cache-test-{}-{}",
-+                std::process::id(),
++                process::id(),
 +                NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
 +            ));
 +            fs::create_dir(&path).unwrap();
@@ -488,4 +467,4 @@ diff --git a/arch/src/aarch64/cache.rs b/arch/src/aarch64/cache.rs
 +            Err(Error::CacheSizeOverflow { .. })
 +        ));
 +    }
-+}
+ }
