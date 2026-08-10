@@ -3,7 +3,7 @@
 Updated: 2026-08-10
 State: STRONG CANDIDATE, HUMAN DESIGN REVIEW USEFUL
 Branch base: canonical `383773a03d8105e3fa6e2a9364b2a8e8366626b0`
-Validated candidate carrier head: `c8424a39bee350238ca5db747d90b3de14dd3ccf`
+Validated candidate carrier head: `7ed7f9a3c90e8873f88a9b88c0416753272d48c8`
 Current canonical source reviewed through: `a1fcb9f790616ac615f66de73be540b0b20844b1`
 Upstream issue: `cloud-hypervisor/cloud-hypervisor#8666`
 Internal record: `teamleaderleo/linux-fieldwork#444`
@@ -12,20 +12,20 @@ Internal record: `teamleaderleo/linux-fieldwork#444`
 
 The candidate gives ACPI table construction a real error boundary and propagates address, mutex, guest-memory, and fw_cfg failures into the VM boot `Result`. Source review narrowed the patch so layout and validated-configuration invariants remain explicit assertions instead of becoming runtime fallback errors.
 
-The final focused matrix is green on the exact reviewed candidate. The remaining decision is whether this error boundary is the right upstream design and whether the deterministic address helper test is sufficient focused unit coverage before preparing a clean production commit.
+This is a small correctness fix rather than a public API redesign: `vmm::acpi` is a private crate module, and the changed ACPI entry-point signatures are used inside VMM. Canonical issue #8666 remains open with no discussion beyond the request that `create_acpi_tables` and its children propagate errors instead of panicking.
 
 ## Runtime failures propagated
 
 - checked ACPI table-address additions;
 - allocator mutex poisoning while constructing the FADT;
 - aarch64 interrupt-controller mutex poisoning while reading the VGIC;
-- missing fw_cfg at the public helper boundary and fw_cfg mutex poisoning;
+- missing fw_cfg at the crate-internal helper boundary and fw_cfg mutex poisoning;
 - guest-memory writes of the RSDP and table bytes;
 - `fw_cfg::add_acpi()` I/O failure.
 
 The final error type is `acpi::Error`. Poisoned-lock errors retain the affected resource name (`allocator`, `interrupt controller`, or `fw_cfg`) because `PoisonError` itself carries no useful source detail. Direct-memory, fw_cfg, and TDX paths all feed one VM error variant: `vm::Error::CreatingAcpiTables`.
 
-`MissingFwCfg` is defensive at the public helper boundary. Valid boot creates fw_cfg before calling `create_acpi_tables_for_fw_cfg()`, but the helper no longer panics if that precondition is violated. This matches nearby upstream practice of propagating failures at an existing caller boundary even when the current call graph normally makes the error unreachable.
+`MissingFwCfg` is defensive at the crate-internal helper boundary. Valid boot enables fw_cfg, populates it, and only then calls `create_acpi_tables_for_fw_cfg()`, but the helper no longer panics if that precondition is violated. This is consistent with nearby upstream work that removes `unwrap()` at an existing error boundary even when the current call graph normally makes the error unreachable.
 
 ## Invariants deliberately retained
 
@@ -40,13 +40,13 @@ The complete production panic inventory in `vmm/src/acpi.rs` was reviewed. Each 
 
 ## Canonical candidate carrier
 
-The carrier now has one candidate representation:
+The carrier has one product representation:
 
-- `linux-fieldwork/acpi-errors/candidate.patch` — reviewed product patch;
-- `linux-fieldwork/acpi-errors/run_candidate.py` — verifies exact upstream blob identities, runs `git apply --check`, applies the patch, and formats it;
+- `linux-fieldwork/acpi-errors/candidate.patch` — exact reviewed and tested product patch;
+- `linux-fieldwork/acpi-errors/run_candidate.py` — verifies exact upstream blob identities, runs `git apply --check`, applies the patch, and verifies rustfmt without mutating the product diff;
 - `.github/workflows/linux-fieldwork-acpi-errors.yml` — focused evidence gate.
 
-The older generated-source transform was removed. REUSE coverage for the internal Python and patch files was added to `.reuse/dep5`.
+The older generated-source transform is gone. REUSE coverage for the internal Python and patch files is present.
 
 Exact guarded upstream blobs:
 
@@ -55,20 +55,20 @@ Exact guarded upstream blobs:
 
 ## Final focused evidence
 
-Validated carrier head: `c8424a39bee350238ca5db747d90b3de14dd3ccf`
-Focused workflow run: `31346100848`
-Candidate job: `93328232200`
-Artifact: `9047409416`
-Artifact digest: `sha256:ab966495356c334f421050396dee368fbd1b2126e4dbff5b921bb7ce75b69c51`
-Generated product patch digest: `sha256:18cbecacd94abc438999ace608cd45b17a9982b96b82af5da7496fad40e6d29d`
+Validated carrier head: `7ed7f9a3c90e8873f88a9b88c0416753272d48c8`
+Focused workflow run: `31347216657`
+Candidate job: `93331259891`
+Artifact: `9047745419`
+Artifact digest: `sha256:e96e8d0776b2c3c3bafa0c92d36ff23fb64232750d9428ef8617a1bceac153ab`
+Stored and generated product patch digest: `sha256:18cbecacd94abc438999ace608cd45b17a9982b96b82af5da7496fad40e6d29d`
 
 All focused gates passed:
 
 - exact source blob verification;
 - `git apply --check` and candidate application;
+- rustfmt verification without modifying the applied patch;
 - generated scope exactly `vmm/src/acpi.rs` and `vmm/src/vm.rs`;
 - `git diff --check`;
-- `cargo fmt --all -- --check`;
 - exact unit test `acpi::tests::test_next_table_address` with both a passing-control addition and the overflow error case;
 - explicit log proof that the exact test executed successfully;
 - `cargo check -p vmm --features kvm`;
@@ -77,9 +77,9 @@ All focused gates passed:
 - aarch64 `cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu` with `gcc-aarch64-linux-gnu` installed;
 - retained candidate diff and artifact upload.
 
-The test step uses `set -o pipefail` and requires the exact `... test_next_table_address ... ok` output, preventing either a zero-test filter or `tee` from creating misleading green evidence.
+The newly retained generated patch was compared byte-for-byte with the stored `candidate.patch`: they are identical and share the `18cbec...` SHA-256 digest. Review artifact, applied artifact, and tested artifact are now the same bytes.
 
-The final retained generated diff was reviewed against the previously green candidate. The only semantic additions in the polish are the conventional `acpi::Error` name, contextual poisoned-lock diagnostics, and the passing control in the address helper test.
+The test step uses `set -o pipefail` and requires the exact `... test_next_table_address ... ok` output, preventing either a zero-test filter or `tee` from creating misleading green evidence.
 
 ## Failure ownership learned during refinement
 
@@ -89,31 +89,30 @@ Earlier red runs were kept separate from product behavior:
 - an early focused test lacked a hypervisor backend;
 - an intermediate aarch64 transform modeled `Gic::get_vgic()` as `Option` even though it returns `Result`;
 - the first real aarch64 cross-check lacked `aarch64-linux-gnu-gcc` on the hosted runner;
-- one polished carrier run failed before Rust because `candidate.patch` lacked its final newline and `git apply` rejected it as corrupt.
+- one polished carrier run failed before Rust because `candidate.patch` lacked its final newline and `git apply` rejected it as corrupt;
+- one carrier-cleanup attempt manually reconstructed a formatted patch from a partial artifact view and truncated it; the next revision restored the literal retained artifact bytes and the full focused matrix passed.
 
-Each owner was repaired independently and the unchanged downstream gate was rerun.
+Each owner was repaired independently before downstream evidence was accepted.
 
-## Broader CI
+## Broader evidence
 
-Final-head normal fork CI: `31346100835`.
+Normal fork CI on the exploratory carrier is useful only as a secondary surface because gitlint/DCO describe research history rather than the generated product patch, and later carrier-only pushes can supersede long matrix jobs. Completed candidate-relevant build, formatting, REUSE, RISC-V, x86_64/aarch64 and Clippy steps across the recent carrier runs have been green; the focused exact-patch run above is the durable candidate receipt.
 
-At the latest checkpoint, preflight, formatting, REUSE, typos, link checks, shell checks, package consistency, and both stable/1.89.0 RISC-V builds are green. Build and Clippy matrices are progressing with their completed candidate-relevant steps green. `gitlint` and DCO remain red because the internal research branch contains historical exploratory commits that do not satisfy upstream production-commit hygiene; those failures do not describe the generated two-file candidate.
+A future contribution branch can be rebuilt however convenient internally, but the eventual human-owned squashed/signed commit should be validated as its own immutable SHA before upstream submission.
 
-The immediately preceding cleaned carrier also completed broad build/quality surfaces successfully across stable/beta/nightly, x86_64/aarch64, KVM/MSHV, fw_cfg, IGVM, SEV-SNP, fuzz-build, formatting, and Clippy. A future upstream packet should materialize one clean signed production commit instead of reusing the exploratory carrier history.
-
-## Source freshness
+## Source freshness and scope
 
 Canonical `main` remains `a1fcb9f790616ac615f66de73be540b0b20844b1` at the latest refresh. It is 36 commits ahead of the original investigation base, with `vmm/src/acpi.rs` and `vmm/src/vm.rs` unchanged from the guarded source blobs.
 
-## Human decision
+The candidate product diff is two files: 98 insertions and 53 deletions (`vmm/src/acpi.rs`: +83/-41; `vmm/src/vm.rs`: +15/-12). Most of that is mechanical error plumbing and signature propagation rather than new behavior.
 
-Review the boundary itself:
+## Current review recommendation
 
-1. Is `acpi::Error` with one VM-level `CreatingAcpiTables` wrapper the preferred design?
-2. Is retaining `MissingFwCfg` as a defensive public-helper error desirable even though valid boot establishes fw_cfg first?
-3. Is the exact address helper test plus the compile/Clippy surfaces enough focused coverage, or should a production packet add a deterministic second failure-path fixture?
+- keep `acpi::Error` with one VM-level `CreatingAcpiTables` wrapper;
+- keep defensive `MissingFwCfg`: the normal boot call graph establishes fw_cfg, but replacing the existing `expect()` is directly aligned with issue #8666 and does not alter an external API;
+- keep the current address-helper unit test unless a natural second production failure fixture appears; a synthetic mutex-poison test would primarily test `std::sync::Mutex` rather than ACPI logic.
 
-If accepted, the next repository action is to materialize a clean production commit from `candidate.patch` on current canonical source, run the same gates on that exact commit, and prepare an internal upstream packet. Canonical upstream contact still requires explicit human authorization.
+No further product-code change is currently justified by the source review. Further work should either challenge one of these boundary decisions or prepare additional evidence, rather than churn the patch for its own sake.
 
 ## External-contact state
 
