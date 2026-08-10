@@ -1,0 +1,97 @@
+name: Linux Fieldwork ACPI errors v2
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/acpi-error-v2-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify carrier and exact product bytes
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD^^)" = "a1fcb9f790616ac615f66de73be540b0b20844b1"
+          test "$(git diff --name-only HEAD^^ HEAD^ | wc -l)" -eq 2
+          git diff --name-only HEAD^^ HEAD^ | tee /tmp/changed-files.txt
+          grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
+          grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/linux-fieldwork-acpi-errors-v2.yml"
+          git diff --check HEAD^^ HEAD^
+          git --no-pager diff --no-color HEAD^^ HEAD^ -- vmm/src/acpi.rs vmm/src/vm.rs > /tmp/acpi-error-v2.patch
+          echo '76c53e120c22dab4886904a875e3aba86ae6d49130e4080cbcdb46ad3df56466  /tmp/acpi-error-v2.patch' | sha256sum --check
+
+      - name: Check intended error boundary
+        run: |
+          set -euxo pipefail
+          git show HEAD^:vmm/src/acpi.rs | grep -F 'AddressOverflow'
+          git show HEAD^:vmm/src/acpi.rs | grep -F 'Missing fw_cfg device for ACPI tables'
+          git show HEAD^:vmm/src/acpi.rs | grep -F 'GuestMemory(#[source] vm_memory::GuestMemoryError)'
+          git show HEAD^:vmm/src/acpi.rs | grep -F 'FwCfg(#[source] io::Error)'
+          git show HEAD^:vmm/src/acpi.rs | grep -F 'fn next_table_address'
+          ! git show HEAD^:vmm/src/acpi.rs | grep -E 'PoisonError|PoisonedLock|poisoned_lock|test_generic_initiator_affinity_size|ACPI table delivery requires fw_cfg'
+
+      - name: Check out exact product commit
+        run: git checkout --detach HEAD^
+
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Rust formatting
+        run: cargo +nightly fmt --all -- --check
+
+      - name: Focused arithmetic unit test
+        run: |
+          set -o pipefail
+          cargo test -p vmm --features kvm acpi::tests::test_next_table_address -- --exact 2>&1 | tee /tmp/acpi-test.log
+          grep -F 'test acpi::tests::test_next_table_address ... ok' /tmp/acpi-test.log
+
+      - name: Focused Clippy
+        run: cargo clippy -p vmm --all-targets --features kvm,fw_cfg,tdx -- -D warnings
+
+      - name: KVM vmm compile
+        run: cargo check -p vmm --features kvm
+
+      - name: MSHV vmm compile
+        run: cargo check -p vmm --features mshv
+
+      - name: fw_cfg vmm compile
+        run: cargo check -p vmm --features kvm,fw_cfg
+
+      - name: TDX vmm compile
+        run: cargo check -p vmm --features kvm,tdx
+
+      - name: aarch64 vmm compile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
+          cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
+
+      - name: Record exact product receipt
+        if: always()
+        run: |
+          sha256sum /tmp/acpi-error-v2.patch | tee /tmp/candidate-sha256.txt
+          git rev-parse HEAD | tee /tmp/product-commit.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: linux-fieldwork-acpi-error-v2
+          path: |
+            /tmp/acpi-error-v2.patch
+            /tmp/changed-files.txt
+            /tmp/candidate-sha256.txt
+            /tmp/product-commit.txt
+          if-no-files-found: warn
