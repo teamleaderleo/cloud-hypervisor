@@ -14,16 +14,16 @@ EXPECTED_BLOBS = {
 ACPI_COMMIT = "0a2f55acbd23b7f44899a69132a4236ef9240027"
 ACPI_PATH = "linux-fieldwork/acpi-errors/candidate.patch"
 ACPI_BLOB = "034cebd92cf31e3b415cdd3d205035b96cd9c1fb"
-CACHE_COMMIT = "044a728ddf5d9dbb00eba04a6df6679e84521441"
+CACHE_COMMIT = "23c8d996457eb8f489f5cfb1bf7f33c9e506e44e"
 CACHE_PARSER_PATH = "linux-fieldwork/cache-errors/candidate.patch"
 CACHE_PARSER_BLOB = "f381a777ea3343c33d2dd0bdbde067a2a91cc692"
 CACHE_PROPAGATION_PATH = "linux-fieldwork/cache-errors/propagation.patch"
-CACHE_PROPAGATION_BLOB = "9dab1cadb2d48c919fc5239c974a30e594a9a6c4"
-INDEX_COMMIT = "7713a59e21c48262843da100087454dae3c0772d"
+CACHE_PROPAGATION_BLOB = "cbfe0675d08f3b4bc1871d3825b9c67d8d5ac71c"
+INDEX_COMMIT = "0cffc6c8f8d79dddb95bce305976a101d8b90a9e"
 INDEX_PATH = "linux-fieldwork/cache-index/candidate.patch"
-INDEX_BLOB = "4550e55faba24d0c1ffc9f7be7a11596d5866b8a"
+INDEX_BLOB = "b6e21517377995f35ff6984ffc29f06a21db06b7"
 CANDIDATE_PATH = "linux-fieldwork/cache-sharing/candidate.patch"
-CANDIDATE_BLOB = "bb45c3741cdebecd183cd05b769dfd56da4f80ab"
+CANDIDATE_BLOB = "eb8cafb0ec407336f86dfc6d3794c729dab3348c"
 
 
 def run(*args: str) -> None:
@@ -120,11 +120,11 @@ run(
     "user.email=linux-fieldwork@example.invalid",
     "commit",
     "-m",
-    "ci: apply validated cache index prerequisite",
+    "ci: apply validated cache identity prerequisite",
 )
 
-# Commit the shared-L2 runtime fixture before applying product code so the
-# retained product diff remains vmm/src/cpu.rs only.
+# Commit runtime fixtures before applying product code so the retained product
+# diff remains vmm/src/cpu.rs only.
 cache_file = Path("arch/src/aarch64/cache.rs")
 cache_source = cache_file.read_text()
 probe = r'''
@@ -134,17 +134,37 @@ probe = r'''
         let temp = TestDir::new();
         let cache_path = temp.path().join("cache");
         fs::create_dir(&cache_path).unwrap();
-
-        write_identity(&cache_path, 0, 1, "Data", "32K");
-        write_identity(&cache_path, 1, 1, "Instruction", "48K");
-        write_identity(&cache_path, 2, 2, "Unified", "1024K");
-        write_identity(&cache_path, 3, 3, "Unified", "32768K");
+        write_representable_identities(&cache_path);
+        write_property(&cache_path, 0, "size", "32K\n");
+        write_property(&cache_path, 1, "size", "48K\n");
+        write_property(&cache_path, 2, "size", "1024K\n");
+        write_property(&cache_path, 3, "size", "32768K\n");
         write_property(&cache_path, 2, "shared_cpu_list", "0,4,8,12\n");
+        write_property(&cache_path, 3, "shared_cpu_list", "0-15\n");
 
         let info = read_cache_topology_from(&cache_path).unwrap().unwrap();
         assert_eq!(info.l2_cache_size, 1024 * 1024);
         assert!(info.l2_cache_shared);
         assert!(info.l3_cache_shared);
+    }
+
+    #[test]
+    fn test_private_l3_layout_is_returned_with_private_flag() {
+        let temp = TestDir::new();
+        let cache_path = temp.path().join("cache");
+        fs::create_dir(&cache_path).unwrap();
+        write_representable_identities(&cache_path);
+        write_property(&cache_path, 0, "size", "32K\n");
+        write_property(&cache_path, 1, "size", "48K\n");
+        write_property(&cache_path, 2, "size", "1024K\n");
+        write_property(&cache_path, 3, "size", "32768K\n");
+        write_property(&cache_path, 2, "shared_cpu_list", "0\n");
+        write_property(&cache_path, 3, "shared_cpu_list", "0\n");
+
+        let info = read_cache_topology_from(&cache_path).unwrap().unwrap();
+        assert_eq!(info.l3_cache_size, 32768 * 1024);
+        assert!(!info.l2_cache_shared);
+        assert!(!info.l3_cache_shared);
     }
 '''
 if not cache_source.endswith("\n}\n"):
@@ -160,7 +180,7 @@ run(
     "user.email=linux-fieldwork@example.invalid",
     "commit",
     "-m",
-    "ci: add shared L2 cache fixture",
+    "ci: add cache sharing fixtures",
 )
 
 candidate = Path(CANDIDATE_PATH)
@@ -173,6 +193,6 @@ run("git", "apply", "--check", str(candidate))
 run("git", "apply", str(candidate))
 run("cargo", "+nightly", "fmt", "--all", "--", "--check")
 print("cache-sharing-prerequisites-applied")
-print("cache-sharing-fixture-committed")
+print("cache-sharing-fixtures-committed")
 print("cache-sharing-candidate-applied")
 print("cache-sharing-candidate-format-verified")
