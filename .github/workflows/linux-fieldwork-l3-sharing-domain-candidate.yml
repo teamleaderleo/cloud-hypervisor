@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
           rustup target add aarch64-unknown-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Apply exact prerequisites and candidate
+      - name: Apply exact prerequisites and stored candidate
         run: python3 linux-fieldwork/l3-sharing-domain/run_candidate.py
       - name: Verify one-file product scope
         run: |
@@ -61,10 +61,16 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Retain candidate diff
+      - name: Verify exact candidate convergence
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/l3-sharing-domain-candidate.patch
-          sha256sum /tmp/l3-sharing-domain-candidate.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/l3-sharing-domain/candidate.patch /tmp/l3-sharing-domain-candidate.patch
+          sha256sum linux-fieldwork/l3-sharing-domain/candidate.patch | tee /tmp/stored-candidate-sha256.txt
+          sha256sum /tmp/l3-sharing-domain-candidate.patch | tee /tmp/generated-candidate-sha256.txt
+          test "$(cut -d' ' -f1 /tmp/stored-candidate-sha256.txt)" = \
+            e9c8f5fb20be1ef7c4a63c95c8e098059fa92f3bd1b2bb0a87cedcf84aac067c
+          test "$(cut -d' ' -f1 /tmp/generated-candidate-sha256.txt)" = \
+            e9c8f5fb20be1ef7c4a63c95c8e098059fa92f3bd1b2bb0a87cedcf84aac067c
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -74,5 +80,6 @@ jobs:
             /tmp/l3-sharing-domain-candidate-policy.log
             /tmp/l3-sharing-domain-candidate-tests.log
             /tmp/l3-sharing-domain-candidate.patch
-            /tmp/candidate-sha256.txt
+            /tmp/stored-candidate-sha256.txt
+            /tmp/generated-candidate-sha256.txt
           if-no-files-found: warn
