@@ -31,8 +31,8 @@ jobs:
           git apply linux-fieldwork/cache-affinity/fdt-test-call.patch
           git apply --check linux-fieldwork/cache-affinity/clippy-fix.patch
           git apply linux-fieldwork/cache-affinity/clippy-fix.patch
-          git apply --check linux-fieldwork/cache-affinity/dynamic-affinity.patch
-          git apply linux-fieldwork/cache-affinity/dynamic-affinity.patch
+          python3 linux-fieldwork/cache-affinity/apply_dynamic_affinity.py
+          cargo +nightly fmt --all
       - name: Verify product scope
         run: |
           git diff --check
@@ -68,6 +68,7 @@ jobs:
             cache_affinity_tests -- --nocapture 2>&1 | tee /tmp/cache-affinity-vmm-tests.log
           grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_uses_fully_pinned_execution_set ... ok' /tmp/cache-affinity-vmm-tests.log
           grep -F 'test cpu::cache_affinity_tests::test_cache_host_cpus_adds_default_set_for_unpinned_vcpu ... ok' /tmp/cache-affinity-vmm-tests.log
+          grep -F 'test cpu::cache_affinity_tests::test_host_cpus_from_affinity_words_supports_high_cpu_ids ... ok' /tmp/cache-affinity-vmm-tests.log
       - name: Full AArch64 cache regression
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
