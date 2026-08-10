@@ -46,6 +46,8 @@ PREREQUISITES = [
     ),
 ]
 
+CANDIDATE_BLOB = "29454b225bc61ac358ea65fae15fbd3ebebd4a40"
+
 
 def run(*args: str) -> None:
     subprocess.run(args, check=True)
@@ -105,92 +107,14 @@ for prerequisite_commit, source_path, expected_blob, destination, paths, message
         commit(sorted(set(pending_paths)), message)
         pending_paths = []
 
-cpu_file = Path("vmm/src/cpu.rs")
-source = cpu_file.read_text()
-
-helper_anchor = "impl CpuManager {\n"
-helper = '''#[cfg(target_arch = "aarch64")]
-fn pptt_cache_presence(cache_info: &CacheTopologyInfo) -> (bool, bool) {
-    let include_l2 = cache_info.l2_cache_size != 0 && !cache_info.l2_cache_shared;
-    let include_l3 = cache_info.l3_cache_size != 0 && include_l2 && cache_info.l3_cache_shared;
-
-    (include_l2, include_l3)
-}
-
-'''
-if source.count(helper_anchor) < 1:
-    raise RuntimeError("CpuManager impl anchor changed")
-source = source.replace(helper_anchor, helper + helper_anchor, 1)
-
-cache_read_anchor = '''        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;
-        let CacheTopologyInfo {
-'''
-cache_read_replacement = '''        let cache_info = read_cache_topology()
-            .map_err(Error::CacheTopology)?
-            .unwrap_or_default();
-        let (include_l2_cache, include_l3_cache) = pptt_cache_presence(&cache_info);
-        let CacheTopologyInfo {
-'''
-if source.count(cache_read_anchor) != 1:
-    raise RuntimeError("PPTT cache read anchor changed")
-source = source.replace(cache_read_anchor, cache_read_replacement)
-
-unwrap_anchor = '''            ..
-        } = cache_info.unwrap_or_default();
-'''
-unwrap_replacement = '''            ..
-        } = cache_info;
-'''
-if source.count(unwrap_anchor) != 1:
-    raise RuntimeError("PPTT cache destructuring anchor changed")
-source = source.replace(unwrap_anchor, unwrap_replacement)
-
-l3_anchor = "        let l3_cache_handle = if l3_cache_size != 0 {\n"
-l2_anchor = "        let l2_cache_handle = if l2_cache_size != 0 {\n"
-if source.count(l3_anchor) != 1 or source.count(l2_anchor) != 1:
-    raise RuntimeError("PPTT cache handle anchors changed")
-source = source.replace(l3_anchor, "        let l3_cache_handle = if include_l3_cache {\n")
-source = source.replace(l2_anchor, "        let l2_cache_handle = if include_l2_cache {\n")
-
-source += '''
-
-#[cfg(all(test, target_arch = "aarch64"))]
-mod pptt_cache_tests {
-    use super::*;
-
-    fn cache_info(l2_size: u32, l2_shared: bool, l3_size: u32, l3_shared: bool) -> CacheTopologyInfo {
-        CacheTopologyInfo {
-            l2_cache_size: l2_size,
-            l2_cache_shared: l2_shared,
-            l3_cache_size: l3_size,
-            l3_cache_shared: l3_shared,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_private_l2_shared_l3_are_representable() {
-        assert_eq!(pptt_cache_presence(&cache_info(1024, false, 4096, true)), (true, true));
-    }
-
-    #[test]
-    fn test_shared_l2_omits_l2_and_l3() {
-        assert_eq!(pptt_cache_presence(&cache_info(1024, true, 4096, true)), (false, false));
-    }
-
-    #[test]
-    fn test_private_l3_is_omitted() {
-        assert_eq!(pptt_cache_presence(&cache_info(1024, false, 4096, false)), (true, false));
-    }
-
-    #[test]
-    fn test_l3_without_l2_is_omitted() {
-        assert_eq!(pptt_cache_presence(&cache_info(0, false, 4096, true)), (false, false));
-    }
-}
-'''
-
-cpu_file.write_text(source)
-run("cargo", "+nightly", "fmt", "--all")
+candidate = Path(__file__).with_name("candidate.patch")
+actual_candidate_blob = output("git", "hash-object", str(candidate))
+if actual_candidate_blob != CANDIDATE_BLOB:
+    raise RuntimeError(
+        f"candidate.patch: expected blob {CANDIDATE_BLOB}, found {actual_candidate_blob}"
+    )
+run("git", "apply", "--check", str(candidate))
+run("git", "apply", str(candidate))
+run("cargo", "+nightly", "fmt", "--all", "--", "--check")
 print("pptt-cache-sharing-prerequisites-applied")
-print("pptt-cache-sharing-candidate-generated")
+print("pptt-cache-sharing-candidate-applied")
