@@ -27,10 +27,21 @@ jobs:
           git apply --numstat linux-fieldwork/cache-errors/candidate.patch
           git apply --numstat linux-fieldwork/cache-errors/propagation.patch
 
-          git fetch --no-tags --depth=100 origin linux-fieldwork/acpi-error-propagation
+          git fetch --no-tags --depth=100 origin fix/8666-acpi-errors
+          test "$(git rev-parse FETCH_HEAD)" = "e9c86bacee14a2fd6fe871dc678c6b3f1ac4012a"
+          git diff --name-only \
+            a1fcb9f790616ac615f66de73be540b0b20844b1 \
+            e9c86bacee14a2fd6fe871dc678c6b3f1ac4012a \
+            -- vmm/src/acpi.rs vmm/src/vm.rs | tee /tmp/acpi-prerequisite-files.txt
+          test "$(cat /tmp/acpi-prerequisite-files.txt)" = $'vmm/src/acpi.rs\nvmm/src/vm.rs'
+          git diff --binary \
+            a1fcb9f790616ac615f66de73be540b0b20844b1 \
+            e9c86bacee14a2fd6fe871dc678c6b3f1ac4012a \
+            -- vmm/src/acpi.rs vmm/src/vm.rs > /tmp/acpi.patch
+          sha256sum /tmp/acpi.patch | tee /tmp/acpi-prerequisite-sha256.txt
+
           rm -rf /tmp/cache-errors-preflight
           git worktree add --detach /tmp/cache-errors-preflight a1fcb9f790616ac615f66de73be540b0b20844b1
-          git show 0a2f55acbd23b7f44899a69132a4236ef9240027:linux-fieldwork/acpi-errors/candidate.patch > /tmp/acpi.patch
           cp linux-fieldwork/cache-errors/candidate.patch /tmp/cache-parser-stored.patch
           cp linux-fieldwork/cache-errors/propagation.patch /tmp/cache-propagation-stored.patch
           (
@@ -94,18 +105,20 @@ jobs:
         run: |
           git diff --binary HEAD -- arch/src/aarch64/cache.rs > /tmp/cache-parser.patch
           git diff --binary HEAD -- arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs vmm/src/cpu.rs vmm/src/acpi.rs > /tmp/cache-propagation.patch
-          cmp linux-fieldwork/cache-errors/candidate.patch /tmp/cache-parser.patch
-          cmp linux-fieldwork/cache-errors/propagation.patch /tmp/cache-propagation.patch
           sha256sum \
             linux-fieldwork/cache-errors/candidate.patch \
             /tmp/cache-parser.patch \
             linux-fieldwork/cache-errors/propagation.patch \
             /tmp/cache-propagation.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/cache-errors/candidate.patch /tmp/cache-parser.patch
+          cmp linux-fieldwork/cache-errors/propagation.patch /tmp/cache-propagation.patch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: linux-fieldwork-cache-errors-candidate
           path: |
+            /tmp/acpi-prerequisite-files.txt
+            /tmp/acpi-prerequisite-sha256.txt
             /tmp/changed-files.txt
             /tmp/cache-tests.log
             /tmp/cache-parser.patch
