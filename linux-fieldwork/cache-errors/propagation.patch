@@ -67,11 +67,10 @@ index c53e482..f70d75e 100644
      if log_enabled!(Level::Debug) {
          fdt::print_fdt(&fdt_final);
 diff --git a/vmm/src/acpi.rs b/vmm/src/acpi.rs
-index 68fc175..5520edd 100644
+index 68fc175..b8a9bd5 100644
 --- a/vmm/src/acpi.rs
 +++ b/vmm/src/acpi.rs
-@@ -25,7 +25,9 @@ use tracer::trace_scoped;
- use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
+@@ -26,6 +26,8 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
  use zerocopy::{FromBytes, Immutable, IntoBytes};
  
  use crate::cpu::CpuManager;
