@@ -59,10 +59,11 @@ jobs:
         run: cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
       - name: x86_64 KVM regression compile
         run: cargo check -p vmm --features kvm
-      - name: Retain product diff
+      - name: Retain and verify product diff
         run: |
           git diff --binary HEAD -- vmm/src/cpu.rs > /tmp/cache-sharing-candidate.patch
-          sha256sum /tmp/cache-sharing-candidate.patch | tee /tmp/candidate-sha256.txt
+          cmp linux-fieldwork/cache-sharing/candidate.patch /tmp/cache-sharing-candidate.patch
+          sha256sum linux-fieldwork/cache-sharing/candidate.patch /tmp/cache-sharing-candidate.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
