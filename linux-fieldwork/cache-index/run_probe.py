@@ -198,6 +198,6 @@ source = cache_file.read_text()
 if not source.endswith("\n}\n"):
     raise RuntimeError("cache.rs test module ending changed")
 cache_file.write_text(source[:-3] + probe + "\n}\n")
-run("cargo", "+nightly", "fmt", "--all", "--", "--check")
+run("cargo", "+nightly", "fmt", "--all")
 print("cache-index-prerequisites-applied")
 print("cache-index-probe-injected")
