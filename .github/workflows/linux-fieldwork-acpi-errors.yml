@@ -29,6 +29,7 @@ jobs:
           test "$(wc -l < /tmp/changed-files.txt)" -eq 2
           grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
+          grep -F '// ACPI requires these SRAT structures to have fixed byte sizes.' vmm/src/acpi.rs
       - name: Rust formatting
         run: cargo +nightly fmt --all -- --check
       - name: Focused arithmetic unit test
@@ -53,11 +54,13 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
           cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
           cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
-      - name: Retain and verify candidate diff
+      - name: Retain combined candidate diff
         run: |
           git diff --binary > /tmp/acpi-error-propagation.patch
-          cmp linux-fieldwork/acpi-errors/candidate.patch /tmp/acpi-error-propagation.patch
-          sha256sum linux-fieldwork/acpi-errors/candidate.patch /tmp/acpi-error-propagation.patch | tee /tmp/candidate-sha256.txt
+          sha256sum \
+            linux-fieldwork/acpi-errors/candidate.patch \
+            linux-fieldwork/acpi-errors/comment.patch \
+            /tmp/acpi-error-propagation.patch | tee /tmp/candidate-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
