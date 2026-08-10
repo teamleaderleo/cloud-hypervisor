@@ -22,6 +22,6 @@ for path, expected in EXPECTED_BLOBS.items():
 patch_path = Path(__file__).with_name("candidate.patch")
 subprocess.run(["git", "apply", "--check", str(patch_path)], check=True)
 subprocess.run(["git", "apply", str(patch_path)], check=True)
-subprocess.run(["cargo", "fmt", "--all"], check=True)
+subprocess.run(["cargo", "fmt", "--all", "--", "--check"], check=True)
 print("acpi-error-candidate-applied")
-print("acpi-error-candidate-formatted")
+print("acpi-error-candidate-format-verified")
