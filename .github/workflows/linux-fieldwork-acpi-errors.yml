@@ -30,7 +30,9 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
       - name: Focused arithmetic unit test
-        run: cargo test -p vmm --features kvm test_next_table_address
+        run: |
+          cargo test -p vmm --features kvm acpi::tests::test_next_table_address -- --exact 2>&1 | tee /tmp/acpi-test.log
+          grep -F 'test acpi::tests::test_next_table_address ... ok' /tmp/acpi-test.log
       - name: KVM vmm compile
         run: cargo check -p vmm --features kvm
       - name: fw_cfg vmm compile
