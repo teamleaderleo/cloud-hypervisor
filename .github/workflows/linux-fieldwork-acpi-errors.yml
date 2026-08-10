@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
       - name: Apply exact-source candidate
         run: python3 linux-fieldwork/acpi-errors/run_candidate.py
       - name: Verify candidate scope
@@ -28,7 +30,7 @@ jobs:
           grep -Fx 'vmm/src/acpi.rs' /tmp/changed-files.txt
           grep -Fx 'vmm/src/vm.rs' /tmp/changed-files.txt
       - name: Rust formatting
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
       - name: Focused arithmetic unit test
         run: |
           set -o pipefail
