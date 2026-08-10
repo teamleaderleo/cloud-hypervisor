@@ -19,9 +19,13 @@ for path, expected in EXPECTED_BLOBS.items():
             f"{path}: expected exact source blob {expected}, found {actual}"
         )
 
-patch_path = Path(__file__).with_name("candidate.patch")
-subprocess.run(["git", "apply", "--check", str(patch_path)], check=True)
-subprocess.run(["git", "apply", str(patch_path)], check=True)
+candidate_path = Path(__file__).with_name("candidate.patch")
+comment_path = Path(__file__).with_name("comment.patch")
+subprocess.run(["git", "apply", "--check", str(candidate_path)], check=True)
+subprocess.run(["git", "apply", str(candidate_path)], check=True)
+subprocess.run(["git", "apply", "--check", str(comment_path)], check=True)
+subprocess.run(["git", "apply", str(comment_path)], check=True)
 subprocess.run(["cargo", "+nightly", "fmt", "--all", "--", "--check"], check=True)
 print("acpi-error-candidate-applied")
+print("acpi-error-comment-refinement-applied")
 print("acpi-error-candidate-format-verified")
