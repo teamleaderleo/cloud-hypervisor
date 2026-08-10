@@ -3,7 +3,6 @@
 Updated: 2026-08-10
 State: CANDIDATE NARROWED, EXACT-HEAD CI PENDING
 Branch base: canonical `383773a03d8105e3fa6e2a9364b2a8e8366626b0`
-Candidate carrier head before this handoff-only receipt: `fd25b6848a7ebe676c86985533954e623db4b31e`
 Current canonical source reviewed through: `a1fcb9f790616ac615f66de73be540b0b20844b1`
 Upstream issue: `cloud-hypervisor/cloud-hypervisor#8666`
 Internal record: `teamleaderleo/linux-fieldwork#444`
