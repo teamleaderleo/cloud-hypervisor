@@ -1,20 +1,15 @@
 diff --git a/vmm/src/cpu.rs b/vmm/src/cpu.rs
 --- a/vmm/src/cpu.rs
 +++ b/vmm/src/cpu.rs
-@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
- #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
+@@ -16,3 +16,3 @@
  use std::io::Write;
 -use std::mem::zeroed;
 +use std::mem::{self, zeroed};
  use std::os::unix::thread::JoinHandleExt;
- use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
- use std::sync::{Arc, Barrier, Mutex};
-@@ -722,7 +722,7 @@ fn process_host_cpus() -> Result<Vec<usize>> {
-     let ret = unsafe {
+@@ -726,5 +726,5 @@ fn process_host_cpus() -> Result<Vec<usize>> {
          libc::sched_getaffinity(
              0,
 -            std::mem::size_of::<libc::cpu_set_t>(),
 +            mem::size_of::<libc::cpu_set_t>(),
              &mut cpuset,
          )
-     };
