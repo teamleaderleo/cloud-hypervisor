@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - name: Install candidate toolchain
         run: |
           sudo apt-get update
@@ -62,11 +64,13 @@ jobs:
         run: cargo clippy -p vmm --all-targets --features kvm -- -D warnings
       - name: Retain and verify exact product diff
         run: |
-          git diff --binary HEAD -- vmm/src/cpu.rs > /tmp/cache-sharing-candidate.patch
-          cmp linux-fieldwork/cache-sharing/candidate.patch /tmp/cache-sharing-candidate.patch
+          git diff --binary --full-index HEAD -- vmm/src/cpu.rs > /tmp/cache-sharing-candidate.patch
           echo '8729ff3d3c106768b536fbfb674f6cdbb0771d133c62e3d2c05de47012eed014  linux-fieldwork/cache-sharing/candidate.patch' | sha256sum -c -
-          echo '8729ff3d3c106768b536fbfb674f6cdbb0771d133c62e3d2c05de47012eed014  /tmp/cache-sharing-candidate.patch' | sha256sum -c -
+          git patch-id --stable < linux-fieldwork/cache-sharing/candidate.patch | awk '{print $1}' > /tmp/stored-patch-id.txt
+          git patch-id --stable < /tmp/cache-sharing-candidate.patch | awk '{print $1}' > /tmp/generated-patch-id.txt
+          cmp /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt
           sha256sum linux-fieldwork/cache-sharing/candidate.patch /tmp/cache-sharing-candidate.patch | tee /tmp/candidate-sha256.txt
+          cat /tmp/stored-patch-id.txt /tmp/generated-patch-id.txt | tee /tmp/candidate-patch-ids.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -77,4 +81,5 @@ jobs:
             /tmp/cache-sharing-candidate-tests.log
             /tmp/cache-sharing-candidate.patch
             /tmp/candidate-sha256.txt
+            /tmp/candidate-patch-ids.txt
           if-no-files-found: warn
