@@ -23,7 +23,7 @@ INDEX_COMMIT = "0cffc6c8f8d79dddb95bce305976a101d8b90a9e"
 INDEX_PATH = "linux-fieldwork/cache-index/candidate.patch"
 INDEX_BLOB = "b6e21517377995f35ff6984ffc29f06a21db06b7"
 CANDIDATE_PATH = "linux-fieldwork/cache-sharing/candidate.patch"
-CANDIDATE_BLOB = "0eaf11c0fadd706854c112c051826c3906b75327"
+CANDIDATE_BLOB = "e606e0559e7d82689eb2ec2f29ed485715d36900"
 
 
 def run(*args: str) -> None:
