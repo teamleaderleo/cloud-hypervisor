@@ -36,6 +36,8 @@ jobs:
           grep -F 'test acpi::tests::test_next_table_address ... ok' /tmp/acpi-test.log
       - name: KVM vmm compile
         run: cargo check -p vmm --features kvm
+      - name: MSHV vmm compile
+        run: cargo check -p vmm --features mshv
       - name: fw_cfg vmm compile
         run: cargo check -p vmm --features kvm,fw_cfg
       - name: TDX vmm compile
