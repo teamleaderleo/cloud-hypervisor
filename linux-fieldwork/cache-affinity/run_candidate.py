@@ -67,8 +67,8 @@ PATCHES = [
 ]
 
 CANDIDATE_PATH = Path("linux-fieldwork/cache-affinity/candidate.patch")
-CANDIDATE_BLOB = "57542277a76d84ed4bfca58aab871ef27f090beb"
-CANDIDATE_SHA256 = "8d5338bfa915420f981802929dea8bf6aad11da77c75f7c602cd73e5aca6b19c"
+CANDIDATE_BLOB = "75601cb2fa2a7d8f8f85dcdd9c3724c41a18d947"
+CANDIDATE_SHA256 = "b38cfe17b90a7cda804b8ad9bdcd921cab4891457d55674a0691b7f0da310498"
 
 
 def run(*args: str) -> None:
