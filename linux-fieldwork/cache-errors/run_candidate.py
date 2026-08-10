@@ -4,6 +4,8 @@ from pathlib import Path
 
 EXPECTED_BLOBS = {
     "arch/src/aarch64/cache.rs": "9200c59627beba0e6366b5105d2fe51a312efaed",
+    "arch/src/aarch64/fdt.rs": "887d9edfe02056ab2567e4252fb6172236e1f770",
+    "arch/src/aarch64/mod.rs": "c53e4829b48c2bcd294642f86e501a6b85dfe680",
     "vmm/src/cpu.rs": "5d9499878b04f7c0fb53cece5768988ceb439d25",
     "vmm/src/acpi.rs": "6ac7666ebdc49c67fbc6233c135e8645f7e64e0f",
     "vmm/src/vm.rs": "12a9fe0ad7068df7b26082b32de65d6f54b33d04",
@@ -70,7 +72,12 @@ run(
 )
 
 candidate_dir = Path(__file__).parent
-for patch_name in ["candidate.patch", "format-fix.patch", "propagation.patch"]:
+for patch_name in [
+    "candidate.patch",
+    "format-fix.patch",
+    "propagation.patch",
+    "fdt-propagation.patch",
+]:
     patch_path = candidate_dir / patch_name
     run("git", "apply", "--check", str(patch_path))
     run("git", "apply", str(patch_path))
