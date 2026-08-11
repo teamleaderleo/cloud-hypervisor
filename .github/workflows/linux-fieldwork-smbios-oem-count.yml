@@ -1,0 +1,75 @@
+name: Linux Fieldwork SMBIOS OEM count
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/smbios-oem-count
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inject baseline-only unit fixture
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("arch/src/x86_64/smbios.rs")
+          source = path.read_text()
+          marker = "\n}"
+          pos = source.rfind(marker)
+          assert pos != -1
+          fixture = r'''
+
+              fn oem_count_and_strings(mem: &GuestMemoryMmap) -> (u8, usize) {
+                  let smbios_ep: Smbios30Entrypoint =
+                      mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
+                  let mut cur = GuestAddress(smbios_ep.physptr);
+
+                  let bios: SmbiosBiosInfo = mem.read_obj(cur).unwrap();
+                  cur = cur.checked_add(bios.length as u64).unwrap();
+                  let (_, next) = read_string_set(mem, cur);
+                  cur = next;
+
+                  let sys: SmbiosSysInfo = mem.read_obj(cur).unwrap();
+                  cur = cur.checked_add(sys.length as u64).unwrap();
+                  let (_, next) = read_string_set(mem, cur);
+                  cur = next;
+
+                  let oem: SmbiosOemStrings = mem.read_obj(cur).unwrap();
+                  assert_eq!(oem.r#type, OEM_STRINGS);
+                  cur = cur.checked_add(oem.length as u64).unwrap();
+                  let (strings, _) = read_string_set(mem, cur);
+                  (oem.count, strings.len())
+              }
+
+              #[test]
+              fn smbios_oem_string_count_boundary() {
+                  for (input_count, encoded_count) in [(255usize, 255u8), (256usize, 0u8)] {
+                      let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 64 << 10)])
+                          .unwrap();
+                      let smbios = SmbiosConfig {
+                          oem_strings: (0..input_count)
+                              .map(|i| format!("oem-{i}"))
+                              .collect::<Vec<_>>()
+                              .into_boxed_slice(),
+                          ..Default::default()
+                      };
+
+                      setup_smbios(&mem, Some(&smbios)).unwrap();
+                      let (actual_count, actual_strings) = oem_count_and_strings(&mem);
+                      assert_eq!(actual_count, encoded_count, "input count {input_count}");
+                      assert_eq!(actual_strings, input_count, "input count {input_count}");
+                  }
+              }
+          '''
+          path.write_text(source[:pos] + fixture + source[pos:])
+          PY
+      - name: Run focused baseline fixture
+        run: cargo test -p arch smbios_oem_string_count_boundary --lib -- --nocapture
