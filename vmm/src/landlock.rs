@@ -7,7 +7,7 @@ use std::convert::TryFrom;
 use std::fs::{self, File};
 use std::io::Error as IoError;
 #[cfg(test)]
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 #[cfg(test)]
 use std::thread;
@@ -188,7 +188,7 @@ fn test_preopened_file_remains_usable_after_restriction() {
         File::open(&allowed_path).unwrap();
 
         let error = File::open(&denied_path).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
 
         let mut contents = String::new();
         preopened.read_to_string(&mut contents).unwrap();
