@@ -117,7 +117,9 @@ jobs:
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
       - name: Format candidate checkout
-        run: cargo +nightly fmt --all -- --check
+        run: cargo +nightly fmt --all
+      - name: Verify formatted candidate
+        run: git diff --check
       - name: Run SMBIOS tests with candidate
         run: cargo test -p arch smbios_ --lib -- --nocapture
       - name: Run arch Clippy with warnings denied
