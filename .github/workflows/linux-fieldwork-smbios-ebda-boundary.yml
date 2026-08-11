@@ -1,0 +1,64 @@
+name: Linux Fieldwork SMBIOS EBDA boundary
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/smbios-ebda-boundary
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify current source and inject high-RAM boundary fixture
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
+          test "$(git rev-parse HEAD:arch/src/x86_64/smbios.rs)" = "2878ac3f5ff8f3eee65af5a046a269112c06b943"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("arch/src/x86_64/smbios.rs")
+          source = path.read_text()
+          pos = source.rfind("\n}")
+          assert pos != -1
+          fixture = r'''
+
+              #[test]
+              fn smbios_crosses_high_ram_baseline() {
+                  const SENTINEL_LEN: usize = 64;
+                  let high_ram_start = crate::layout::HIGH_RAM_START;
+                  let ebda_tail = high_ram_start.raw_value() - SMBIOS_START;
+                  let mem = GuestMemoryMmap::from_ranges(&[(
+                      GuestAddress(SMBIOS_START),
+                      ebda_tail as usize + 0x20_000,
+                  )])
+                  .unwrap();
+                  mem.write_slice(&[0xFE; SENTINEL_LEN], high_ram_start)
+                      .unwrap();
+
+                  let smbios = SmbiosConfig {
+                      system: Some(SmbiosSystem {
+                          manufacturer: Some("A".repeat(70 * 1024)),
+                          ..Default::default()
+                      }),
+                      ..Default::default()
+                  };
+
+                  let encoded = setup_smbios(&mem, Some(&smbios)).unwrap();
+                  assert!(encoded > ebda_tail);
+
+                  let mut observed = [0u8; SENTINEL_LEN];
+                  mem.read_slice(&mut observed, high_ram_start).unwrap();
+                  assert_eq!(observed, [b'A'; SENTINEL_LEN]);
+              }
+          '''
+          path.write_text(source[:pos] + fixture + source[pos:])
+          PY
+      - name: Run exact baseline boundary fixture
+        run: cargo test --locked -p arch --lib smbios_crosses_high_ram_baseline -- --exact --nocapture
