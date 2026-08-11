@@ -112,6 +112,8 @@ jobs:
           '''
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
       - name: Format injected checkout
         run: cargo +nightly fmt --all
       - name: Check patch whitespace
