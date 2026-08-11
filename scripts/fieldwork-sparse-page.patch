@@ -1,0 +1,222 @@
+diff --git a/vmm/src/sparse.rs b/vmm/src/sparse.rs
+--- a/vmm/src/sparse.rs
++++ b/vmm/src/sparse.rs
+@@ -180,6 +180,13 @@
+         Ok(out)
+     }
+ 
++    fn test_page_size() -> u64 {
++        // SAFETY: _SC_PAGESIZE is a read-only process query with no pointer arguments.
++        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
++        assert!(page_size > 0, "sysconf(_SC_PAGESIZE) failed");
++        page_size as u64
++    }
++
+     /// Punch an explicit hole into `f`. Tests use this instead of relying on
+     /// "didn't write here" to mean "is a hole": modern shmem/tmpfs may
+     /// allocate a multi-page folio on the first write and report the whole
+@@ -239,14 +246,15 @@
+ 
+     #[test]
+     fn written_pages_show_as_data_extents() {
++        let page = test_page_size();
+         let f = make_memfd(0);
+         sparse_layout(
+             &f,
+-            4096 * 16,
+-            &[(4096 * 2, 4096, 0xAB), (4096 * 5, 4096 * 2, 0xCD)],
++            page * 16,
++            &[(page * 2, page, 0xAB), (page * 5, page * 2, 0xCD)],
+         );
+-        let extents = collect_extents(f.as_fd(), 0, 4096 * 16).unwrap();
+-        assert_eq!(extents, vec![(4096 * 2, 4096), (4096 * 5, 4096 * 2)]);
++        let extents = collect_extents(f.as_fd(), 0, page * 16).unwrap();
++        assert_eq!(extents, vec![(page * 2, page), (page * 5, page * 2)]);
+     }
+ 
+     #[test]
+@@ -269,17 +277,20 @@
+ 
+     #[test]
+     fn sparse_file_yields_extents_at_written_positions() {
++        let page = test_page_size();
+         let tmp = tempfile::NamedTempFile::new().unwrap();
+         let f = tmp.reopen().unwrap();
+-        sparse_layout(&f, 4096 * 16, &[(4096 * 4, 4096 * 2, 0x55)]);
+-        let extents = collect_extents(f.as_fd(), 0, 4096 * 16).unwrap();
+-        assert_eq!(extents, vec![(4096 * 4, 4096 * 2)]);
++        sparse_layout(&f, page * 16, &[(page * 4, page * 2, 0x55)]);
++        let extents = collect_extents(f.as_fd(), 0, page * 16).unwrap();
++        assert_eq!(extents, vec![(page * 4, page * 2)]);
+     }
+ 
+     #[test]
+     fn single_extent_at_zero_offset() {
++        let page = test_page_size();
++        let page_usize = page as usize;
+         let src = make_memfd(0);
+-        sparse_layout(&src, 4096 * 16, &[(4096 * 3, 4096 * 2, 0x42)]);
++        sparse_layout(&src, page * 16, &[(page * 3, page * 2, 0x42)]);
+ 
+         // Pre-fill dst with a sentinel byte so we can verify that
+         // write_region_sparse only wrote where the source had data: any
+@@ -288,56 +299,76 @@
+         // filesystem reports holes after a partial write).
+         let tmp = tempfile::NamedTempFile::new().unwrap();
+         let dst = tmp.reopen().unwrap();
+-        dst.write_all_at(&vec![0xFE; 4096 * 16], 0).unwrap();
++        dst.write_all_at(&vec![0xFE; page_usize * 16], 0).unwrap();
+ 
+-        let used = write_region_sparse(&src, 0, &dst, 0, 4096 * 16).unwrap();
++        let used = write_region_sparse(&src, 0, &dst, 0, page * 16).unwrap();
+         assert!(used);
+ 
+         let buf = fs::read(tmp.path()).unwrap();
+-        assert!(buf[..4096 * 3].iter().all(|&b| b == 0xFE));
+-        assert!(buf[4096 * 3..4096 * 5].iter().all(|&b| b == 0x42));
+-        assert!(buf[4096 * 5..].iter().all(|&b| b == 0xFE));
++        assert!(buf[..page_usize * 3].iter().all(|&b| b == 0xFE));
++        assert!(
++            buf[page_usize * 3..page_usize * 5]
++                .iter()
++                .all(|&b| b == 0x42)
++        );
++        assert!(buf[page_usize * 5..].iter().all(|&b| b == 0xFE));
+     }
+ 
+     #[test]
+     fn two_regions_in_same_destination_file_at_dst_offset() {
++        let page = test_page_size();
++        let page_usize = page as usize;
+         let src_a = make_memfd(0);
+-        sparse_layout(&src_a, 4096 * 16, &[(4096, 4096 * 2, 0xAA)]);
++        sparse_layout(&src_a, page * 16, &[(page, page * 2, 0xAA)]);
+         let src_b = make_memfd(0);
+-        sparse_layout(&src_b, 4096 * 16, &[(4096 * 5, 4096 * 3, 0xBB)]);
++        sparse_layout(&src_b, page * 16, &[(page * 5, page * 3, 0xBB)]);
+ 
+         let tmp = tempfile::NamedTempFile::new().unwrap();
+         let dst = tmp.reopen().unwrap();
+-        sparse_layout(&dst, 4096 * 32, &[]);
++        sparse_layout(&dst, page * 32, &[]);
+ 
+-        let _ = write_region_sparse(&src_a, 0, &dst, 0, 4096 * 16).unwrap();
+-        let _ = write_region_sparse(&src_b, 0, &dst, 4096 * 16, 4096 * 16).unwrap();
++        let _ = write_region_sparse(&src_a, 0, &dst, 0, page * 16).unwrap();
++        let _ = write_region_sparse(&src_b, 0, &dst, page * 16, page * 16).unwrap();
+ 
+         let buf = fs::read(tmp.path()).unwrap();
+-        assert!(buf[..4096].iter().all(|&b| b == 0));
+-        assert!(buf[4096..4096 * 3].iter().all(|&b| b == 0xAA));
+-        assert!(buf[4096 * 3..4096 * 16].iter().all(|&b| b == 0));
+-        assert!(buf[4096 * 16..4096 * 21].iter().all(|&b| b == 0));
+-        assert!(buf[4096 * 21..4096 * 24].iter().all(|&b| b == 0xBB));
+-        assert!(buf[4096 * 24..].iter().all(|&b| b == 0));
++        assert!(buf[..page_usize].iter().all(|&b| b == 0));
++        assert!(buf[page_usize..page_usize * 3].iter().all(|&b| b == 0xAA));
++        assert!(buf[page_usize * 3..page_usize * 16].iter().all(|&b| b == 0));
++        assert!(
++            buf[page_usize * 16..page_usize * 21]
++                .iter()
++                .all(|&b| b == 0)
++        );
++        assert!(
++            buf[page_usize * 21..page_usize * 24]
++                .iter()
++                .all(|&b| b == 0xBB)
++        );
++        assert!(buf[page_usize * 24..].iter().all(|&b| b == 0));
+     }
+ 
+     #[test]
+     fn extent_at_non_zero_src_offset() {
++        let page = test_page_size();
++        let page_usize = page as usize;
+         let src = make_memfd(0);
+-        sparse_layout(&src, 4096 * 32, &[(4096 * 20, 4096 * 2, 0x77)]);
++        sparse_layout(&src, page * 32, &[(page * 20, page * 2, 0x77)]);
+ 
+         let tmp = tempfile::NamedTempFile::new().unwrap();
+         let dst = tmp.reopen().unwrap();
+-        sparse_layout(&dst, 4096 * 16, &[]);
++        sparse_layout(&dst, page * 16, &[]);
+ 
+-        let used = write_region_sparse(&src, 4096 * 16, &dst, 0, 4096 * 16).unwrap();
++        let used = write_region_sparse(&src, page * 16, &dst, 0, page * 16).unwrap();
+         assert!(used);
+ 
+         let buf = fs::read(tmp.path()).unwrap();
+-        assert!(buf[..4096 * 4].iter().all(|&b| b == 0));
+-        assert!(buf[4096 * 4..4096 * 6].iter().all(|&b| b == 0x77));
+-        assert!(buf[4096 * 6..].iter().all(|&b| b == 0));
++        assert!(buf[..page_usize * 4].iter().all(|&b| b == 0));
++        assert!(
++            buf[page_usize * 4..page_usize * 6]
++                .iter()
++                .all(|&b| b == 0x77)
++        );
++        assert!(buf[page_usize * 6..].iter().all(|&b| b == 0));
+     }
+ 
+     /// Round-trip: write two regions sparsely into a snapshot file, then
+@@ -346,24 +361,26 @@
+     /// the original content including holes.
+     #[test]
+     fn round_trip_sparse_write_then_read() {
++        let page = test_page_size();
++        let page_usize = page as usize;
+         let src_a = make_memfd(0);
+-        sparse_layout(&src_a, 4096 * 16, &[(4096 * 2, 4096 * 3, 0xAA)]);
++        sparse_layout(&src_a, page * 16, &[(page * 2, page * 3, 0xAA)]);
+ 
+         let src_b = make_memfd(0);
+-        sparse_layout(&src_b, 4096 * 16, &[(4096 * 10, 4096 * 4, 0xBB)]);
++        sparse_layout(&src_b, page * 16, &[(page * 10, page * 4, 0xBB)]);
+ 
+         let tmp = tempfile::NamedTempFile::new().unwrap();
+         let dst = tmp.reopen().unwrap();
+-        let total = 4096u64 * 32;
++        let total = page * 32;
+         sparse_layout(&dst, total, &[]);
+ 
+-        write_region_sparse(&src_a, 0, &dst, 0, 4096 * 16).unwrap();
+-        write_region_sparse(&src_b, 0, &dst, 4096 * 16, 4096 * 16).unwrap();
++        write_region_sparse(&src_a, 0, &dst, 0, page * 16).unwrap();
++        write_region_sparse(&src_b, 0, &dst, page * 16, page * 16).unwrap();
+ 
+         // Read back using next_data_extent + read_at, mirroring
+         // fill_saved_regions's sparse restore path.
+         let snap = tmp.reopen().unwrap();
+-        let regions: Vec<(u64, u64)> = vec![(0, 4096 * 16), (4096 * 16, 4096 * 16)];
++        let regions: Vec<(u64, u64)> = vec![(0, page * 16), (page * 16, page * 16)];
+         let mut restored = vec![0u8; total as usize];
+ 
+         for &(file_cursor, region_len) in &regions {
+@@ -388,10 +405,22 @@
+         assert_eq!(restored, dense);
+ 
+         // Verify the actual data landed in the right places.
+-        assert!(restored[..4096 * 2].iter().all(|&b| b == 0));
+-        assert!(restored[4096 * 2..4096 * 5].iter().all(|&b| b == 0xAA));
+-        assert!(restored[4096 * 5..4096 * 26].iter().all(|&b| b == 0));
+-        assert!(restored[4096 * 26..4096 * 30].iter().all(|&b| b == 0xBB));
+-        assert!(restored[4096 * 30..].iter().all(|&b| b == 0));
++        assert!(restored[..page_usize * 2].iter().all(|&b| b == 0));
++        assert!(
++            restored[page_usize * 2..page_usize * 5]
++                .iter()
++                .all(|&b| b == 0xAA)
++        );
++        assert!(
++            restored[page_usize * 5..page_usize * 26]
++                .iter()
++                .all(|&b| b == 0)
++        );
++        assert!(
++            restored[page_usize * 26..page_usize * 30]
++                .iter()
++                .all(|&b| b == 0xBB)
++        );
++        assert!(restored[page_usize * 30..].iter().all(|&b| b == 0));
+     }
+ }
