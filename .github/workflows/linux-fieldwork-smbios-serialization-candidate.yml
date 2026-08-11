@@ -116,6 +116,8 @@ jobs:
           '''
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
+      - name: Install nightly rustfmt
+        run: rustup component add --toolchain nightly rustfmt
       - name: Format candidate checkout
         run: cargo +nightly fmt --all
       - name: Verify formatted candidate
