@@ -1,8 +1,7 @@
 diff --git a/vmm/src/lib.rs b/vmm/src/lib.rs
 --- a/vmm/src/lib.rs
 +++ b/vmm/src/lib.rs
-@@
-     fn vm_pause(&mut self) -> result::Result<(), VmError> {
+@@ -2435,7 +2435,11 @@
          match self.vm {
              VmOwnership::Owned(ref mut vm) => vm.pause().map_err(VmError::Pause),
              VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
@@ -15,7 +14,7 @@ diff --git a/vmm/src/lib.rs b/vmm/src/lib.rs
          }
      }
  
-     fn vm_resume(&mut self) -> result::Result<(), VmError> {
+@@ -2443,6 +2447,10 @@
          match self.vm {
              VmOwnership::Owned(ref mut vm) => vm.resume().map_err(VmError::Resume),
              VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
@@ -27,7 +26,7 @@ diff --git a/vmm/src/lib.rs b/vmm/src/lib.rs
 +            }),
          }
      }
-@@
+@@ -2560,4 +2568,9 @@
      fn vm_shutdown(&mut self) -> result::Result<(), VmError> {
 -        let mut vm = self.vm.take_owned_or(VmError::VmNotRunning)?;
 +        let no_vm_error = if self.vm_config.is_some() {
@@ -38,9 +37,7 @@ diff --git a/vmm/src/lib.rs b/vmm/src/lib.rs
 +        let mut vm = self.vm.take_owned_or(no_vm_error)?;
          // Drain console_info so that the FDs are not reused
          let _ = self.console_info.take();
-         let r = vm.shutdown();
-@@
-     fn vm_power_button(&mut self) -> result::Result<(), VmError> {
+@@ -3137,6 +3150,10 @@
          match self.vm {
              VmOwnership::Owned(ref mut vm) => vm.power_button(),
              VmOwnership::Migration { .. } => Err(VmError::VmMigrating),
