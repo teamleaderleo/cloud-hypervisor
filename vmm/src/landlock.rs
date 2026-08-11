@@ -4,14 +4,26 @@
 
 use std::convert::TryFrom;
 #[cfg(test)]
-use std::fs::{self, File};
+use std::env;
+#[cfg(test)]
+use std::fs::{self, File, OpenOptions};
 use std::io::Error as IoError;
 #[cfg(test)]
 use std::io::{ErrorKind, Read};
 use std::path::Path;
 #[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
 use std::thread;
 
+#[cfg(test)]
+use block::async_io::OwnedIoBuffer;
+#[cfg(test)]
+use block::disk_file::AsyncDiskFile;
+#[cfg(test)]
+use block::error::BlockErrorKind;
+#[cfg(test)]
+use block::formats::qcow::{Error as QcowError, QcowDisk};
 #[cfg(test)]
 use landlock::make_bitflags;
 use landlock::{
@@ -191,6 +203,72 @@ fn test_preopened_file_remains_usable_after_restriction() {
         let mut contents = String::new();
         preopened.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "preopened");
+    })
+    .join()
+    .unwrap();
+}
+
+fn fieldwork_qcow_fixture() -> (PathBuf, PathBuf, PathBuf) {
+    let overlay = PathBuf::from(env::var_os("FIELDWORK_QCOW_OVERLAY").unwrap());
+    let allowed_dir = PathBuf::from(env::var_os("FIELDWORK_QCOW_ALLOWED_DIR").unwrap());
+    let denied_backing = PathBuf::from(env::var_os("FIELDWORK_QCOW_DENIED_BACKING").unwrap());
+    (overlay, allowed_dir, denied_backing)
+}
+
+#[test]
+#[ignore = "requires an external Fieldwork QCOW backing fixture"]
+fn test_qcow_backing_open_respects_landlock_order() {
+    const MARKER: &[u8] = b"LFQCOW42";
+
+    let (overlay, allowed_dir, denied_backing) = fieldwork_qcow_fixture();
+    assert!(overlay.starts_with(&allowed_dir));
+    assert!(!denied_backing.starts_with(&allowed_dir));
+
+    let late_overlay = overlay.clone();
+    let late_allowed_dir = allowed_dir.clone();
+    let late_denied_backing = denied_backing.clone();
+    thread::spawn(move || {
+        let mut landlock = Landlock::new().unwrap();
+        landlock
+            .add_rule_with_access(&late_allowed_dir, "rw")
+            .unwrap();
+        landlock.restrict_self().unwrap();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&late_overlay)
+            .unwrap();
+        let error = QcowDisk::new(file, false, true, true, false).unwrap_err();
+        assert_eq!(error.kind(), BlockErrorKind::Io);
+        match error.downcast_ref::<QcowError>() {
+            Some(QcowError::BackingFileIo(path, source)) => {
+                assert_eq!(Path::new(path), late_denied_backing);
+                assert_eq!(source.kind(), ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected denied QCOW backing-file open, got {other:?}"),
+        }
+    })
+    .join()
+    .unwrap();
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&overlay)
+        .unwrap();
+    let disk = QcowDisk::new(file, false, true, true, false).unwrap();
+    thread::spawn(move || {
+        let mut landlock = Landlock::new().unwrap();
+        landlock.add_rule_with_access(&allowed_dir, "rw").unwrap();
+        landlock.restrict_self().unwrap();
+
+        let mut io = disk.create_async_io(1).unwrap();
+        io.read_to_vec(0, OwnedIoBuffer::new(MARKER.len(), 1).unwrap(), 0)
+            .unwrap();
+        let completion = io.next_completed_request().unwrap();
+        assert_eq!(completion.result, MARKER.len() as i32);
+        assert_eq!(completion.buffer.unwrap().as_slice(), MARKER);
     })
     .join()
     .unwrap();
