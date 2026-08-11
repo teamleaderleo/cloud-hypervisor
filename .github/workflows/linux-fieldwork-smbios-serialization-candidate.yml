@@ -20,6 +20,8 @@ jobs:
       - name: Apply candidate and inject boundary fixtures
         shell: bash
         run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD:arch/src/x86_64/smbios.rs)" = "2878ac3f5ff8f3eee65af5a046a269112c06b943"
           python3 - <<'PY'
           from pathlib import Path
 
@@ -41,8 +43,7 @@ jobs:
           assert old in source
           source = source.replace(old, new, 1)
 
-          marker = "\n}"
-          pos = source.rfind(marker)
+          pos = source.rfind("\n}")
           assert pos != -1
           fixture = r'''
 
@@ -117,12 +118,24 @@ jobs:
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
       - name: Install nightly rustfmt
-        run: rustup component add --toolchain nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
       - name: Format candidate checkout
         run: cargo +nightly fmt --all
       - name: Verify formatted candidate
         run: git diff --check
-      - name: Run SMBIOS tests with candidate
-        run: cargo test -p arch smbios_ --lib -- --nocapture
+      - name: Require and run exact boundary regressions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for name in \
+            smbios_candidate_accepts_255_oem_strings \
+            smbios_candidate_rejects_256_oem_strings \
+            smbios_candidate_rejects_embedded_nul
+          do
+            cargo test --locked -p arch --lib -- --list | grep -F "$name: test"
+            cargo test --locked -p arch --lib "$name" -- --nocapture
+          done
+      - name: Run full SMBIOS unit family
+        run: cargo test --locked -p arch smbios_ --lib -- --nocapture
       - name: Run arch Clippy with warnings denied
-        run: cargo clippy -p arch --all-targets -- -D warnings
+        run: cargo clippy --locked -p arch --all-targets -- -D warnings
