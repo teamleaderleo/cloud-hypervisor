@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - linux-fieldwork/smbios-oem-count
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
