@@ -20,4 +20,4 @@ jobs:
       - name: Execute focused Landlock probe
         run: |
           set -eufo pipefail
-          cargo test -p vmm test_preopened_file_remains_usable_after_restriction --lib -- --nocapture
+          cargo test -p vmm --lib --no-default-features --features kvm test_preopened_file_remains_usable_after_restriction -- --nocapture
