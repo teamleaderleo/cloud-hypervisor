@@ -3,8 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::convert::TryFrom;
+#[cfg(test)]
+use std::fs::{self, File};
 use std::io::Error as IoError;
+#[cfg(test)]
+use std::io::Read;
 use std::path::Path;
+#[cfg(test)]
+use std::thread;
 
 #[cfg(test)]
 use landlock::make_bitflags;
@@ -13,6 +19,8 @@ use landlock::{
     RulesetCreatedAttr, RulesetError, path_beneath_rules,
 };
 use thiserror::Error;
+#[cfg(test)]
+use vmm_sys_util::tempdir::TempDir;
 
 #[derive(Debug, Error)]
 pub enum LandlockError {
@@ -154,4 +162,38 @@ fn test_try_from_access() {
     assert!(landlock_access.access == write_access);
 
     LandlockAccess::try_from("").unwrap_err();
+}
+
+#[test]
+fn test_preopened_file_remains_usable_after_restriction() {
+    let allowed = TempDir::new().unwrap();
+    let denied = TempDir::new().unwrap();
+    let allowed_path = allowed.as_path().join("allowed");
+    let denied_path = denied.as_path().join("denied");
+
+    fs::write(&allowed_path, b"allowed").unwrap();
+    fs::write(&denied_path, b"preopened").unwrap();
+
+    let preopened = File::open(&denied_path).unwrap();
+    let allowed_dir = allowed.as_path().to_path_buf();
+
+    thread::spawn(move || {
+        let mut preopened = preopened;
+        let mut landlock = Landlock::new().unwrap();
+        landlock
+            .add_rule_with_access(&allowed_dir, "r")
+            .unwrap();
+        landlock.restrict_self().unwrap();
+
+        File::open(&allowed_path).unwrap();
+
+        let error = File::open(&denied_path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let mut contents = String::new();
+        preopened.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "preopened");
+    })
+    .join()
+    .unwrap();
 }
