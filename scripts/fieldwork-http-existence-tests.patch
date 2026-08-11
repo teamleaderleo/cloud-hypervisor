@@ -1,0 +1,55 @@
+diff --git a/vmm/src/lib.rs b/vmm/src/lib.rs
+--- a/vmm/src/lib.rs
++++ b/vmm/src/lib.rs
+@@ -3539,14 +3539,51 @@
+     #[test]
+     fn test_vmm_vm_create() {
+         let mut vmm = create_dummy_vmm();
+         let config = create_dummy_vm_config();
+ 
+         assert!(matches!(vmm.vm_create(config.clone()), Ok(())));
+         assert!(matches!(
+             vmm.vm_create(config),
+             Err(VmError::VmAlreadyCreated)
+         ));
+     }
+ 
++    fn assert_vm_not_created(result: result::Result<(), VmError>) {
++        let error = result.unwrap_err();
++        assert!(
++            matches!(&error, VmError::VmNotCreated),
++            "expected VmNotCreated, got {error:?}"
++        );
++    }
++
++    fn assert_vm_not_running(result: result::Result<(), VmError>) {
++        let error = result.unwrap_err();
++        assert!(
++            matches!(&error, VmError::VmNotRunning),
++            "expected VmNotRunning, got {error:?}"
++        );
++    }
++
++    #[test]
++    fn test_bare_vmm_lifecycle_reports_not_created() {
++        let mut vmm = create_dummy_vmm();
++
++        assert_vm_not_created(vmm.vm_pause());
++        assert_vm_not_created(vmm.vm_resume());
++        assert_vm_not_created(vmm.vm_shutdown());
++        assert_vm_not_created(vmm.vm_power_button());
++    }
++
++    #[test]
++    fn test_created_unbooted_vmm_lifecycle_reports_not_running() {
++        let mut vmm = create_dummy_vmm();
++        vmm.vm_create(create_dummy_vm_config()).unwrap();
++
++        assert_vm_not_running(vmm.vm_pause());
++        assert_vm_not_running(vmm.vm_resume());
++        assert_vm_not_running(vmm.vm_shutdown());
++        assert_vm_not_running(vmm.vm_power_button());
++    }
++
+     #[test]
+     fn test_vmm_vm_cold_add_device() {
