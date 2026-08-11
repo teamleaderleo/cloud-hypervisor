@@ -95,6 +95,13 @@ fn api_error_status_code(error: &ApiError) -> StatusCode {
             | VmError::NoDeviceToRemove(_)
             | VmError::DeviceManager(DeviceManagerError::UnknownDeviceId(_)),
         ) => StatusCode::NotFound,
+        Some(
+            VmError::VmAlreadyCreated
+            | VmError::VmNotRunning
+            | VmError::VmMigrating
+            | VmError::VmRestoring
+            | VmError::InvalidStateTransition(_, _),
+        ) => StatusCode::Conflict,
         Some(VmError::ConfigValidation(e)) => match e {
             ValidationError::IdentifierNotUnique(_) | ValidationError::DuplicateDevicePath(_) => {
                 StatusCode::Conflict
@@ -540,6 +547,26 @@ mod tests {
     }
 
     #[test]
+    fn test_lifecycle_state_errors_map_to_conflict() {
+        assert_eq!(
+            api_error_status_code(&ApiError::VmPause(VmError::VmNotRunning)),
+            StatusCode::Conflict
+        );
+        assert_eq!(
+            api_error_status_code(&ApiError::VmCreate(VmError::VmAlreadyCreated)),
+            StatusCode::Conflict
+        );
+        assert_eq!(
+            api_error_status_code(&ApiError::VmRemoveDevice(VmError::VmMigrating)),
+            StatusCode::Conflict
+        );
+        assert_eq!(
+            api_error_status_code(&ApiError::VmSnapshot(VmError::VmRestoring)),
+            StatusCode::Conflict
+        );
+    }
+
+    #[test]
     fn test_duplicate_identifier_or_path_maps_to_conflict() {
         assert_eq!(
             api_error_status_code(&ApiError::VmAddDisk(VmError::ConfigValidation(
@@ -586,7 +613,7 @@ mod tests {
     #[test]
     fn test_other_errors_map_to_internal_server_error() {
         assert_eq!(
-            api_error_status_code(&ApiError::VmRemoveDevice(VmError::VmMigrating)),
+            api_error_status_code(&ApiError::VmPause(VmError::InvalidNumaConfig)),
             StatusCode::InternalServerError
         );
     }
