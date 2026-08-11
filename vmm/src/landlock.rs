@@ -208,6 +208,7 @@ fn test_preopened_file_remains_usable_after_restriction() {
     .unwrap();
 }
 
+#[cfg(test)]
 fn fieldwork_qcow_fixture() -> (PathBuf, PathBuf, PathBuf) {
     let overlay = PathBuf::from(env::var_os("FIELDWORK_QCOW_OVERLAY").unwrap());
     let allowed_dir = PathBuf::from(env::var_os("FIELDWORK_QCOW_ALLOWED_DIR").unwrap());
@@ -267,7 +268,7 @@ fn test_qcow_backing_open_respects_landlock_order() {
         io.read_to_vec(0, OwnedIoBuffer::new(MARKER.len(), 1).unwrap(), 0)
             .unwrap();
         let completion = io.next_completed_request().unwrap();
-        assert_eq!(completion.result, MARKER.len() as i32);
+        assert_eq!(completion.result, i32::try_from(MARKER.len()).unwrap());
         assert_eq!(completion.buffer.unwrap().as_slice(), MARKER);
     })
     .join()
