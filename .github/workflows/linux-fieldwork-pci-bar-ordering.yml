@@ -1,0 +1,129 @@
+name: Linux Fieldwork PCI BAR ordering
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/pci-bar-ordering-baseline
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inject baseline-only PCI BAR fixture
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("pci/src/configuration.rs")
+          source = path.read_text()
+          marker = "\n}"
+          pos = source.rfind(marker)
+          assert pos != -1
+          fixture = r'''
+
+              fn fieldwork_bar_cfg(addr: u64) -> PciConfiguration {
+                  let mut cfg = PciConfiguration::new(
+                      0x1234,
+                      0x5678,
+                      0x1,
+                      PciClassCode::MultimediaController,
+                      &PciMultimediaSubclass::AudioController,
+                      None,
+                      PciHeaderType::Device,
+                      0xabcd,
+                      0x2468,
+                      None,
+                      None,
+                  );
+                  cfg.add_pci_bar(
+                      &PciBarConfiguration::new(
+                          0,
+                          0x1000,
+                          PciBarRegionType::Memory32BitRegion,
+                          PciBarPrefetchable::NotPrefetchable,
+                      )
+                      .set_address(addr),
+                  )
+                  .unwrap();
+                  cfg
+              }
+
+              fn fieldwork_apply_move(
+                  occupied: &mut std::collections::BTreeSet<u64>,
+                  params: &BarReprogrammingParams,
+              ) -> bool {
+                  assert!(occupied.remove(&params.old_base));
+                  if occupied.contains(&params.new_base) {
+                      occupied.insert(params.old_base);
+                      false
+                  } else {
+                      occupied.insert(params.new_base);
+                      true
+                  }
+              }
+
+              #[test]
+              fn fieldwork_two_device_bar_rebalance_collides_on_first_enable() {
+                  const A0: u64 = 0x1000_0000;
+                  const A1: u64 = 0x1000_1000;
+                  const A2: u64 = 0x1000_2000;
+
+                  let mut f0 = fieldwork_bar_cfg(A0);
+                  let mut f1 = fieldwork_bar_cfg(A1);
+                  let mut occupied = std::collections::BTreeSet::from([A0, A1]);
+
+                  // Both devices start with memory decoding disabled. Reprogramming a BAR
+                  // updates config state but emits no relocation, so the old ranges remain live.
+                  assert!(f1
+                      .write_config_register(BAR0_REG, 0, &(A2 as u32).to_le_bytes())
+                      .is_empty());
+                  assert_eq!(occupied, std::collections::BTreeSet::from([A0, A1]));
+
+                  assert!(f0
+                      .write_config_register(BAR0_REG, 0, &(A1 as u32).to_le_bytes())
+                      .is_empty());
+                  assert_eq!(occupied, std::collections::BTreeSet::from([A0, A1]));
+
+                  // Enabling F0 first flushes A0->A1 while F1 still owns A1.
+                  let f0_moves = f0.write_config_register(
+                      COMMAND_REG,
+                      0,
+                      &COMMAND_REG_MEMORY_SPACE_MASK.to_le_bytes(),
+                  );
+                  assert_eq!(f0_moves.len(), 1);
+                  assert_eq!(f0_moves[0].old_base, A0);
+                  assert_eq!(f0_moves[0].new_base, A1);
+                  assert!(!fieldwork_apply_move(&mut occupied, &f0_moves[0]));
+
+                  // Current bus recovery restores the old config-space BAR after the rejected move.
+                  f0.restore_bar_addr(&f0_moves[0]);
+                  assert_eq!(f0.get_bar_addr(0), A0);
+                  assert_eq!(occupied, std::collections::BTreeSet::from([A0, A1]));
+
+                  // F1 can then complete A1->A2, leaving the guest's requested F0=A1 assignment lost.
+                  let f1_moves = f1.write_config_register(
+                      COMMAND_REG,
+                      0,
+                      &COMMAND_REG_MEMORY_SPACE_MASK.to_le_bytes(),
+                  );
+                  assert_eq!(f1_moves.len(), 1);
+                  assert_eq!(f1_moves[0].old_base, A1);
+                  assert_eq!(f1_moves[0].new_base, A2);
+                  assert!(fieldwork_apply_move(&mut occupied, &f1_moves[0]));
+                  assert_eq!(f1.get_bar_addr(0), A2);
+                  assert_eq!(occupied, std::collections::BTreeSet::from([A0, A2]));
+              }
+          '''
+          path.write_text(source[:pos] + fixture + source[pos:])
+          PY
+      - name: Run focused PCI baseline fixture
+        run: cargo test -p pci fieldwork_two_device_bar_rebalance_collides_on_first_enable --lib -- --nocapture
