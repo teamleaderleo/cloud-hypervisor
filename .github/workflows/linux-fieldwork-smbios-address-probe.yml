@@ -1,0 +1,120 @@
+name: Linux Fieldwork SMBIOS address probe
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/smbios-address-probe
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  address-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parameterize SMBIOS start in checkout and inject probe
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("arch/src/x86_64/smbios.rs")
+          source = path.read_text()
+
+          old = '''pub fn setup_smbios(mem: &GuestMemoryMmap, smbios: Option<&SmbiosConfig>) -> Result<u64> {'''
+          new = '''pub fn setup_smbios_at(\n    mem: &GuestMemoryMmap,\n    smbios: Option<&SmbiosConfig>,\n    start: u64,\n) -> Result<u64> {'''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          source = source.replace(
+              '''    let physptr = GuestAddress(SMBIOS_START)\n        .checked_add(size_of::<Smbios30Entrypoint>() as u64)''',
+              '''    let physptr = GuestAddress(start)\n        .checked_add(size_of::<Smbios30Entrypoint>() as u64)''',
+              1,
+          )
+          source = source.replace(
+              '''        mem.write_obj(smbios_ep, GuestAddress(SMBIOS_START))\n            .map_err(Error::WriteSmbiosEp)?;''',
+              '''        mem.write_obj(smbios_ep, GuestAddress(start))\n            .map_err(Error::WriteSmbiosEp)?;''',
+              1,
+          )
+
+          old = '''    Ok(curptr.unchecked_offset_from(physptr) + size_of::<Smbios30Entrypoint>() as u64)\n}\n\n#[cfg(test)]'''
+          new = '''    Ok(curptr.unchecked_offset_from(physptr) + size_of::<Smbios30Entrypoint>() as u64)\n}\n\npub fn setup_smbios(mem: &GuestMemoryMmap, smbios: Option<&SmbiosConfig>) -> Result<u64> {\n    setup_smbios_at(mem, smbios, SMBIOS_START)\n}\n\n#[cfg(test)]'''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          marker = "\n}"
+          pos = source.rfind(marker)
+          assert pos != -1
+          fixture = r'''
+
+              #[test]
+              fn smbios_custom_start_preserves_table_payload() {
+                  const CUSTOM_START: u64 = SMBIOS_START + 0x20_000;
+                  let default_mem = GuestMemoryMmap::from_ranges(&[
+                      (GuestAddress(SMBIOS_START), 64 << 10),
+                  ])
+                  .unwrap();
+                  let custom_mem = GuestMemoryMmap::from_ranges(&[
+                      (GuestAddress(CUSTOM_START), 64 << 10),
+                  ])
+                  .unwrap();
+                  let config = SmbiosConfig {
+                      system: Some(SmbiosSystem {
+                          manufacturer: Some("fieldwork-maker".to_string()),
+                          product_name: Some("fieldwork-product".to_string()),
+                          version: Some("v1".to_string()),
+                          serial_number: Some("serial".to_string()),
+                          uuid: Some("01234567-89ab-cdef-0123-456789abcdef".to_string()),
+                          sku_number: Some("sku".to_string()),
+                          family: Some("family".to_string()),
+                      }),
+                      chassis: Some(SmbiosChassisConfig {
+                          asset_tag: Some("asset".to_string()),
+                      }),
+                      oem_strings: vec!["oem-one".to_string(), "oem-two".to_string()]
+                          .into_boxed_slice(),
+                  };
+
+                  let default_len = setup_smbios(&default_mem, Some(&config)).unwrap();
+                  let custom_len = setup_smbios_at(&custom_mem, Some(&config), CUSTOM_START).unwrap();
+                  assert_eq!(default_len, custom_len);
+
+                  let default_ep: Smbios30Entrypoint =
+                      default_mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
+                  let custom_ep: Smbios30Entrypoint =
+                      custom_mem.read_obj(GuestAddress(CUSTOM_START)).unwrap();
+                  assert_eq!(default_ep.max_size, custom_ep.max_size);
+                  assert_eq!(
+                      default_ep.physptr,
+                      SMBIOS_START + size_of::<Smbios30Entrypoint>() as u64
+                  );
+                  assert_eq!(
+                      custom_ep.physptr,
+                      CUSTOM_START + size_of::<Smbios30Entrypoint>() as u64
+                  );
+
+                  let table_len = default_ep.max_size as usize;
+                  let mut default_payload = vec![0u8; table_len];
+                  let mut custom_payload = vec![0u8; table_len];
+                  default_mem
+                      .read_slice(&mut default_payload, GuestAddress(default_ep.physptr))
+                      .unwrap();
+                  custom_mem
+                      .read_slice(&mut custom_payload, GuestAddress(custom_ep.physptr))
+                      .unwrap();
+                  assert_eq!(default_payload, custom_payload);
+              }
+          '''
+          path.write_text(source[:pos] + fixture + source[pos:])
+          PY
+      - name: Format injected checkout
+        run: cargo +nightly fmt --all
+      - name: Check patch whitespace
+        run: git diff --check
+      - name: Run SMBIOS address and existing tests
+        run: cargo test -p arch smbios_ --lib -- --nocapture
