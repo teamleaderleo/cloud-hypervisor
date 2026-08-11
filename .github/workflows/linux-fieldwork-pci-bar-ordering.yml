@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inject baseline-only PCI BAR fixture
+      - name: Inject baseline-only PCI BAR fixtures
         shell: bash
         run: |
           python3 - <<'PY'
@@ -81,8 +81,6 @@ jobs:
                   let mut f1 = fieldwork_bar_cfg(A1);
                   let mut occupied = std::collections::BTreeSet::from([A0, A1]);
 
-                  // Both devices start with memory decoding disabled. Reprogramming a BAR
-                  // updates config state but emits no relocation, so the old ranges remain live.
                   assert!(f1
                       .write_config_register(BAR0_REG, 0, &(A2 as u32).to_le_bytes())
                       .is_empty());
@@ -93,7 +91,6 @@ jobs:
                       .is_empty());
                   assert_eq!(occupied, std::collections::BTreeSet::from([A0, A1]));
 
-                  // Enabling F0 first flushes A0->A1 while F1 still owns A1.
                   let f0_moves = f0.write_config_register(
                       COMMAND_REG,
                       0,
@@ -104,12 +101,10 @@ jobs:
                   assert_eq!(f0_moves[0].new_base, A1);
                   assert!(!fieldwork_apply_move(&mut occupied, &f0_moves[0]));
 
-                  // Current bus recovery restores the old config-space BAR after the rejected move.
                   f0.restore_bar_addr(&f0_moves[0]);
                   assert_eq!(f0.get_bar_addr(0), A0);
                   assert_eq!(occupied, std::collections::BTreeSet::from([A0, A1]));
 
-                  // F1 can then complete A1->A2, leaving the guest's requested F0=A1 assignment lost.
                   let f1_moves = f1.write_config_register(
                       COMMAND_REG,
                       0,
@@ -122,8 +117,50 @@ jobs:
                   assert_eq!(f1.get_bar_addr(0), A2);
                   assert_eq!(occupied, std::collections::BTreeSet::from([A0, A2]));
               }
+
+              struct FieldworkCountingDevice(std::sync::atomic::AtomicUsize);
+
+              impl vm_device::BusDeviceSync for FieldworkCountingDevice {
+                  fn read(&self, _base: u64, _offset: u64, data: &mut [u8]) {
+                      self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                      data.fill(0x5a);
+                  }
+              }
+
+              #[test]
+              fn fieldwork_mse_clear_keeps_old_bar_decodable() {
+                  const A0: u64 = 0x1000_0000;
+                  let mut cfg = fieldwork_bar_cfg(A0);
+                  let bus = vm_device::Bus::new();
+                  let device = std::sync::Arc::new(FieldworkCountingDevice(
+                      std::sync::atomic::AtomicUsize::new(0),
+                  ));
+                  bus.insert(device.clone(), A0, 0x1000).unwrap();
+
+                  assert!(cfg
+                      .write_config_register(
+                          COMMAND_REG,
+                          0,
+                          &COMMAND_REG_MEMORY_SPACE_MASK.to_le_bytes(),
+                      )
+                      .is_empty());
+
+                  let mut data = [0u8; 1];
+                  bus.read(A0, &mut data).unwrap();
+                  assert_eq!(data, [0x5a]);
+                  assert_eq!(device.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+                  assert!(cfg
+                      .write_config_register(COMMAND_REG, 0, &0u16.to_le_bytes())
+                      .is_empty());
+
+                  data = [0u8; 1];
+                  bus.read(A0, &mut data).unwrap();
+                  assert_eq!(data, [0x5a]);
+                  assert_eq!(device.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+              }
           '''
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
-      - name: Run focused PCI baseline fixture
-        run: cargo test -p pci fieldwork_two_device_bar_rebalance_collides_on_first_enable --lib -- --nocapture
+      - name: Run focused PCI baseline fixtures
+        run: cargo test -p pci fieldwork_ --lib -- --nocapture
