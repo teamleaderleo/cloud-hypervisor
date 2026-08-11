@@ -1,0 +1,23 @@
+name: Fieldwork Landlock pre-open runtime
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/landlock-preopen-runtime
+
+permissions:
+  contents: read
+
+jobs:
+  landlock-preopen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@v7
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Execute focused Landlock probe
+        run: |
+          set -eufo pipefail
+          cargo test -p vmm test_preopened_file_remains_usable_after_restriction --lib -- --nocapture
