@@ -1,4 +1,4 @@
-name: Linux Fieldwork SMBIOS OEM count
+name: Linux Fieldwork SMBIOS boundaries
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inject baseline-only unit fixture
+      - name: Inject baseline-only unit fixtures
         shell: bash
         run: |
           python3 - <<'PY'
@@ -52,6 +52,22 @@ jobs:
                   (oem.count, strings.len())
               }
 
+              fn type1_and_strings(mem: &GuestMemoryMmap) -> (SmbiosSysInfo, Vec<String>) {
+                  let smbios_ep: Smbios30Entrypoint =
+                      mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
+                  let mut cur = GuestAddress(smbios_ep.physptr);
+
+                  let bios: SmbiosBiosInfo = mem.read_obj(cur).unwrap();
+                  cur = cur.checked_add(bios.length as u64).unwrap();
+                  let (_, next) = read_string_set(mem, cur);
+                  cur = next;
+
+                  let sys: SmbiosSysInfo = mem.read_obj(cur).unwrap();
+                  cur = cur.checked_add(sys.length as u64).unwrap();
+                  let (strings, _) = read_string_set(mem, cur);
+                  (sys, strings)
+              }
+
               #[test]
               fn smbios_oem_string_count_boundary() {
                   for (input_count, encoded_count) in [(255usize, 255u8), (256usize, 0u8)] {
@@ -71,8 +87,30 @@ jobs:
                       assert_eq!(actual_strings, input_count, "input count {input_count}");
                   }
               }
+
+              #[test]
+              fn smbios_embedded_nul_retargets_type1_product() {
+                  let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 4096)]).unwrap();
+                  let smbios = SmbiosConfig {
+                      system: Some(SmbiosSystem {
+                          manufacturer: Some("maker\0shadow".to_string()),
+                          product_name: Some("product".to_string()),
+                          ..Default::default()
+                      }),
+                      ..Default::default()
+                  };
+
+                  setup_smbios(&mem, Some(&smbios)).unwrap();
+                  let (sys, strings) = type1_and_strings(&mem);
+
+                  assert_eq!(sys.manufacturer, 1);
+                  assert_eq!(sys.product_name, 2);
+                  assert_eq!(strings, vec!["maker", "shadow", "product"]);
+                  assert_eq!(strings[sys.manufacturer as usize - 1], "maker");
+                  assert_eq!(strings[sys.product_name as usize - 1], "shadow");
+              }
           '''
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
-      - name: Run focused baseline fixture
-        run: cargo test -p arch smbios_oem_string_count_boundary --lib -- --nocapture
+      - name: Run focused baseline fixtures
+        run: cargo test -p arch smbios_ --lib -- --nocapture
