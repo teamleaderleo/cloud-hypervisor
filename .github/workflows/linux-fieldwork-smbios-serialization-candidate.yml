@@ -1,0 +1,124 @@
+name: Linux Fieldwork SMBIOS candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/smbios-serialization-candidate
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply candidate and inject boundary fixtures
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("arch/src/x86_64/smbios.rs")
+          source = path.read_text()
+
+          old = '''    /// SMBIOS string index overflow (u8 limit reached).\n    #[error("SMBIOS string index overflow (u8 limit reached: {})", u8::MAX)]\n    TooManyStrings,\n}'''
+          new = '''    /// SMBIOS string index overflow (u8 limit reached).\n    #[error("SMBIOS string index overflow (u8 limit reached: {})", u8::MAX)]\n    TooManyStrings,\n    /// Too many OEM strings for the SMBIOS Type 11 one-byte count.\n    #[error("Too many SMBIOS OEM strings (maximum: {})", u8::MAX)]\n    TooManyOemStrings,\n    /// SMBIOS strings use NUL as a delimiter and cannot contain it as data.\n    #[error("SMBIOS string contains an embedded NUL byte")]\n    StringContainsNull,\n}'''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          old = '''fn write_string(\n    mem: &GuestMemoryMmap,\n    val: &str,\n    mut curptr: GuestAddress,\n) -> Result<GuestAddress> {\n    for c in val.as_bytes().iter() {'''
+          new = '''fn write_string(\n    mem: &GuestMemoryMmap,\n    val: &str,\n    mut curptr: GuestAddress,\n) -> Result<GuestAddress> {\n    if val.as_bytes().contains(&0) {\n        return Err(Error::StringContainsNull);\n    }\n\n    for c in val.as_bytes().iter() {'''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          old = '''    if !oem_strings.is_empty() {\n        handle += 1;\n\n        let smbios_oemstrings = SmbiosOemStrings {\n            r#type: OEM_STRINGS,\n            length: size_of::<SmbiosOemStrings>() as u8,\n            handle,\n            count: oem_strings.len() as u8,\n        };'''
+          new = '''    if !oem_strings.is_empty() {\n        handle += 1;\n\n        let count = u8::try_from(oem_strings.len()).map_err(|_| Error::TooManyOemStrings)?;\n        let smbios_oemstrings = SmbiosOemStrings {\n            r#type: OEM_STRINGS,\n            length: size_of::<SmbiosOemStrings>() as u8,\n            handle,\n            count,\n        };'''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          marker = "\n}"
+          pos = source.rfind(marker)
+          assert pos != -1
+          fixture = r'''
+
+              fn candidate_oem_count(mem: &GuestMemoryMmap) -> u8 {
+                  let smbios_ep: Smbios30Entrypoint =
+                      mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
+                  let mut cur = GuestAddress(smbios_ep.physptr);
+
+                  let bios: SmbiosBiosInfo = mem.read_obj(cur).unwrap();
+                  cur = cur.checked_add(bios.length as u64).unwrap();
+                  let (_, next) = read_string_set(mem, cur);
+                  cur = next;
+
+                  let sys: SmbiosSysInfo = mem.read_obj(cur).unwrap();
+                  cur = cur.checked_add(sys.length as u64).unwrap();
+                  let (_, next) = read_string_set(mem, cur);
+                  cur = next;
+
+                  let oem: SmbiosOemStrings = mem.read_obj(cur).unwrap();
+                  assert_eq!(oem.r#type, OEM_STRINGS);
+                  oem.count
+              }
+
+              #[test]
+              fn smbios_candidate_accepts_255_oem_strings() {
+                  let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 64 << 10)])
+                      .unwrap();
+                  let smbios = SmbiosConfig {
+                      oem_strings: (0..255)
+                          .map(|i| format!("oem-{i}"))
+                          .collect::<Vec<_>>()
+                          .into_boxed_slice(),
+                      ..Default::default()
+                  };
+
+                  setup_smbios(&mem, Some(&smbios)).unwrap();
+                  assert_eq!(candidate_oem_count(&mem), 255);
+              }
+
+              #[test]
+              fn smbios_candidate_rejects_256_oem_strings() {
+                  let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 64 << 10)])
+                      .unwrap();
+                  let smbios = SmbiosConfig {
+                      oem_strings: (0..256)
+                          .map(|i| format!("oem-{i}"))
+                          .collect::<Vec<_>>()
+                          .into_boxed_slice(),
+                      ..Default::default()
+                  };
+
+                  let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();
+                  assert!(matches!(err, Error::TooManyOemStrings));
+              }
+
+              #[test]
+              fn smbios_candidate_rejects_embedded_nul() {
+                  let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 4096)]).unwrap();
+                  let smbios = SmbiosConfig {
+                      system: Some(SmbiosSystem {
+                          manufacturer: Some("maker\0shadow".to_string()),
+                          product_name: Some("product".to_string()),
+                          ..Default::default()
+                      }),
+                      ..Default::default()
+                  };
+
+                  let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();
+                  assert!(matches!(err, Error::StringContainsNull));
+              }
+          '''
+          path.write_text(source[:pos] + fixture + source[pos:])
+          PY
+      - name: Format candidate checkout
+        run: cargo +nightly fmt --all -- --check
+      - name: Run SMBIOS tests with candidate
+        run: cargo test -p arch smbios_ --lib -- --nocapture
+      - name: Run arch Clippy with warnings denied
+        run: cargo clippy -p arch --all-targets -- -D warnings
