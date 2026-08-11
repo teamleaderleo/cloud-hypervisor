@@ -180,9 +180,7 @@ fn test_preopened_file_remains_usable_after_restriction() {
     thread::spawn(move || {
         let mut preopened = preopened;
         let mut landlock = Landlock::new().unwrap();
-        landlock
-            .add_rule_with_access(&allowed_dir, "r")
-            .unwrap();
+        landlock.add_rule_with_access(&allowed_dir, "r").unwrap();
         landlock.restrict_self().unwrap();
 
         File::open(&allowed_path).unwrap();
