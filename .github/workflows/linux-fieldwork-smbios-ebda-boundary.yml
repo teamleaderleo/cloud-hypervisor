@@ -64,4 +64,9 @@ jobs:
           path.write_text(source[:pos] + fixture + source[pos:])
           PY
       - name: Run exact baseline boundary fixture
-        run: cargo test --locked -p arch --lib smbios_crosses_high_ram_baseline -- --exact --nocapture
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test_name="x86_64::smbios::unit_tests::smbios_crosses_high_ram_baseline"
+          cargo test --locked -p arch --lib -- --list | grep -F "$test_name: test"
+          cargo test --locked -p arch --lib "$test_name" -- --exact --nocapture
