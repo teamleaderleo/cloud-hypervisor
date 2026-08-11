@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - linux-fieldwork/smbios-ebda-boundary
+  pull_request:
+    branches:
+      - linux-fieldwork/smbios-ebda-base-1af93ac
   workflow_dispatch:
 
 permissions:
