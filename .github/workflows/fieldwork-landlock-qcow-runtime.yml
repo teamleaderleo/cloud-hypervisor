@@ -1,0 +1,41 @@
+name: Fieldwork QCOW Landlock ordering runtime
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/landlock-qcow-runtime
+
+permissions:
+  contents: read
+
+jobs:
+  qcow-landlock-order:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@v7
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install qemu-img
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils
+      - name: Create disposable QCOW backing fixture
+        run: |
+          set -eufo pipefail
+          root="$RUNNER_TEMP/fieldwork-qcow-landlock"
+          rm -rf "$root"
+          mkdir -p "$root/allowed" "$root/denied"
+          truncate -s 1M "$root/denied/base.raw"
+          printf 'LFQCOW42' | dd of="$root/denied/base.raw" conv=notrunc status=none
+          qemu-img create -f qcow2 -F raw -b "$root/denied/base.raw" "$root/allowed/overlay.qcow2" 1M
+          qemu-img info --backing-chain "$root/allowed/overlay.qcow2"
+          echo "FIELDWORK_QCOW_OVERLAY=$root/allowed/overlay.qcow2" >> "$GITHUB_ENV"
+          echo "FIELDWORK_QCOW_ALLOWED_DIR=$root/allowed" >> "$GITHUB_ENV"
+          echo "FIELDWORK_QCOW_DENIED_BACKING=$root/denied/base.raw" >> "$GITHUB_ENV"
+      - name: Execute focused QCOW Landlock ordering probe
+        run: |
+          set -eufo pipefail
+          cargo test -p vmm --lib --no-default-features --features kvm \
+            test_qcow_backing_open_respects_landlock_order -- --ignored --nocapture
