@@ -1,0 +1,141 @@
+diff --git a/arch/src/lib.rs b/arch/src/lib.rs
+--- a/arch/src/lib.rs
++++ b/arch/src/lib.rs
+@@ -22,6 +22,8 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
+ type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
+ 
++pub mod smbios;
++
+ /// Type for returning error code.
+ #[derive(Debug, Error)]
+ pub enum Error {
+diff --git a/arch/src/smbios.rs b/arch/src/smbios.rs
+new file mode 100644
+--- /dev/null
++++ b/arch/src/smbios.rs
+@@ -0,0 +1,40 @@
++// Copyright © 2026 Contributors to the Cloud Hypervisor project
++//
++// SPDX-License-Identifier: Apache-2.0
++
++pub(crate) const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
++pub(crate) const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct SmbiosConfig {
++    pub system: Option<SmbiosSystem>,
++    pub chassis: Option<SmbiosChassisConfig>,
++    pub oem_strings: Box<[String]>,
++}
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct SmbiosSystem {
++    pub manufacturer: Option<String>,
++    pub product_name: Option<String>,
++    pub version: Option<String>,
++    pub serial_number: Option<String>,
++    pub uuid: Option<String>,
++    pub sku_number: Option<String>,
++    pub family: Option<String>,
++}
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct SmbiosChassisConfig {
++    pub asset_tag: Option<String>,
++}
++
++impl SmbiosConfig {
++    pub fn is_empty(&self) -> bool {
++        *self == Self::default()
++    }
++}
++
+diff --git a/arch/src/x86_64/smbios.rs b/arch/src/x86_64/smbios.rs
+--- a/arch/src/x86_64/smbios.rs
++++ b/arch/src/x86_64/smbios.rs
+@@ -10,6 +10,11 @@ use thiserror::Error;
+ use uuid::Uuid;
+ use vm_memory::{Address, ByteValued, Bytes, GuestAddress};
+ 
++pub use crate::smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};
++use crate::smbios::{
++    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME,
++};
+ use crate::GuestMemoryMmap;
+ use crate::layout::SMBIOS_START;
+@@ -54,40 +59,6 @@ const CHASSIS_SECURITY_STATUS_NONE: u8 = 0x03;
+ const PCI_SUPPORTED: u64 = 1 << 7;
+ const IS_VIRTUAL_MACHINE: u8 = 1 << 4;
+-pub const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
+-pub const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
+-
+-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+-pub struct SmbiosConfig {
+-    pub system: Option<SmbiosSystem>,
+-    pub chassis: Option<SmbiosChassisConfig>,
+-    pub oem_strings: Box<[String]>,
+-}
+-
+-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+-pub struct SmbiosSystem {
+-    pub manufacturer: Option<String>,
+-    pub product_name: Option<String>,
+-    pub version: Option<String>,
+-    pub serial_number: Option<String>,
+-    pub uuid: Option<String>,
+-    pub sku_number: Option<String>,
+-    pub family: Option<String>,
+-}
+-
+-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+-pub struct SmbiosChassisConfig {
+-    pub asset_tag: Option<String>,
+-}
+-
+-impl SmbiosConfig {
+-    pub fn is_empty(&self) -> bool {
+-        *self == Self::default()
+-    }
+-}
+ 
+ fn compute_checksum<T: Copy + ByteValued>(v: &T) -> u8 {
+     let mut checksum: u8 = 0;
+diff --git a/vmm/src/vm_config.rs b/vmm/src/vm_config.rs
+--- a/vmm/src/vm_config.rs
++++ b/vmm/src/vm_config.rs
+@@ -169,11 +169,10 @@ pub struct PlatformConfig {
+     pub vfio_p2p_dma: bool,
+ }
+ 
+-#[cfg(target_arch = "x86_64")]
+ impl PlatformConfig {
+     /// Returns `None` if no SMBIOS-relevant platform fields are set, otherwise
+     /// `Some` with a [`SmbiosConfig`] built from the populated fields.
+-    pub fn smbios_config(&self) -> Option<arch::x86_64::SmbiosConfig> {
++    pub fn smbios_config(&self) -> Option<arch::smbios::SmbiosConfig> {
+         let has_system = [
+             &self.system_serial_number,
+             &self.system_uuid,
+@@ -186,7 +185,7 @@ impl PlatformConfig {
+         .iter()
+         .any(|v| v.is_some());
+ 
+-        let system = has_system.then_some(arch::x86_64::SmbiosSystem {
++        let system = has_system.then_some(arch::smbios::SmbiosSystem {
+             manufacturer: self.system_manufacturer.clone(),
+             product_name: self.system_product_name.clone(),
+             version: self.system_version.clone(),
+@@ -199,11 +198,11 @@ impl PlatformConfig {
+         let chassis =
+             self.chassis_asset_tag
+                 .clone()
+-                .map(|asset_tag| arch::x86_64::SmbiosChassisConfig {
++                .map(|asset_tag| arch::smbios::SmbiosChassisConfig {
+                     asset_tag: Some(asset_tag),
+                 });
+ 
+-        let smbios = arch::x86_64::SmbiosConfig {
++        let smbios = arch::smbios::SmbiosConfig {
+             system,
+             chassis,
+             oem_strings: self.oem_strings.clone().unwrap_or_default(),
