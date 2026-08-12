@@ -30,6 +30,7 @@ jobs:
           git fetch --depth=1 fieldwork-read fieldwork/kvm-dirty-log-granule-repair-v2
           git show FETCH_HEAD:.github/fieldwork/apply-dirty-log-repair-v2.py > /tmp/apply-dirty-log-repair-v2.py
           git show FETCH_HEAD:.github/fieldwork/fix-dirty-log-oracle-v2.py > /tmp/fix-dirty-log-oracle-v2.py
+          git show FETCH_HEAD:.github/fieldwork/fix-dirty-log-clippy-v2.py > /tmp/fix-dirty-log-clippy-v2.py
 
       - name: Apply repaired candidate
         shell: bash
@@ -37,6 +38,7 @@ jobs:
           set -euo pipefail
           python3 /tmp/apply-dirty-log-repair-v2.py
           python3 /tmp/fix-dirty-log-oracle-v2.py
+          python3 /tmp/fix-dirty-log-clippy-v2.py
 
       - name: Install build dependencies
         shell: bash
@@ -87,8 +89,12 @@ jobs:
           cargo check -p vmm --features kvm --target aarch64-unknown-linux-gnu
           cargo check -p vmm --features mshv --target aarch64-unknown-linux-gnu
 
-      - name: Clippy repaired KVM path
-        run: cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
+      - name: Clippy repaired KVM and MSHV paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
+          cargo clippy -p vmm --features mshv --all-targets --tests -- -D warnings
 
       - name: Inspect final diff
         shell: bash
