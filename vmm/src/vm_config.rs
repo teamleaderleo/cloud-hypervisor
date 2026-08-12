@@ -1212,6 +1212,13 @@ pub struct VmConfig {
 
 impl VmConfig {
     pub(crate) fn apply_landlock(&self) -> LandlockResult<()> {
+        self.apply_landlock_with_additional_rules(&[])
+    }
+
+    pub(crate) fn apply_landlock_with_additional_rules(
+        &self,
+        additional_rules: &[LandlockConfig],
+    ) -> LandlockResult<()> {
         let mut landlock = Landlock::new()?;
 
         #[cfg(target_arch = "aarch64")]
@@ -1305,6 +1312,10 @@ impl VmConfig {
             for landlock_rule in landlock_rules.iter() {
                 landlock_rule.apply_landlock(&mut landlock)?;
             }
+        }
+
+        for landlock_rule in additional_rules {
+            landlock_rule.apply_landlock(&mut landlock)?;
         }
 
         landlock.restrict_self()?;
