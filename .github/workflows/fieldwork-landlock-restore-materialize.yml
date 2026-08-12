@@ -17,10 +17,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Apply exact source substitutions and push v2 candidate
+      - name: Apply exact source substitutions and push v3 candidate
         env:
           BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
-          CANDIDATE_BRANCH: linux-fieldwork/landlock-restore-order-v2
+          CANDIDATE_BRANCH: linux-fieldwork/landlock-restore-order-v3
         run: |
           set -eufo pipefail
           git checkout --detach "$BASE_SHA"
@@ -112,34 +112,33 @@ jobs:
               '        trace_scoped!("Vm::new");\n\n'
               "        if snapshot_from_id(snapshot, MEMORY_MANAGER_SNAPSHOT_ID).is_some()\n"
               "            && vm_config.lock().unwrap().landlock_enable\n"
+              "            && let Some(source_url) = source_url\n"
               "        {\n"
-              "            if let Some(source_url) = source_url {\n"
-              "                let mut memory_file_path = url_to_path(source_url)\n"
-              "                    .map_err(MemoryManagerError::Restore)\n"
-              "                    .map_err(Error::MemoryManager)?;\n"
-              "                memory_file_path.push(SNAPSHOT_FILENAME);\n"
+              "            let mut memory_file_path = url_to_path(source_url)\n"
+              "                .map_err(MemoryManagerError::Restore)\n"
+              "                .map_err(Error::MemoryManager)?;\n"
+              "            memory_file_path.push(SNAPSHOT_FILENAME);\n"
               "\n"
-              "                let mut additional_rules = vec![LandlockConfig {\n"
-              "                    path: memory_file_path,\n"
-              '                    access: "r".to_string(),\n'
-              "                }];\n"
-              "                if matches!(\n"
-              "                    memory_restore_mode.as_ref(),\n"
-              "                    Some(MemoryRestoreMode::OnDemand)\n"
-              "                ) && Path::new(\"/dev/userfaultfd\").exists()\n"
-              "                {\n"
-              "                    additional_rules.push(LandlockConfig {\n"
-              '                        path: "/dev/userfaultfd".into(),\n'
-              '                        access: "rw".to_string(),\n'
-              "                    });\n"
-              "                }\n"
-              "\n"
-              "                vm_config\n"
-              "                    .lock()\n"
-              "                    .unwrap()\n"
-              "                    .apply_landlock_with_additional_rules(&additional_rules)\n"
-              "                    .map_err(Error::ApplyLandlock)?;\n"
+              "            let mut additional_rules = vec![LandlockConfig {\n"
+              "                path: memory_file_path,\n"
+              '                access: "r".to_string(),\n'
+              "            }];\n"
+              "            if matches!(\n"
+              "                memory_restore_mode.as_ref(),\n"
+              "                Some(MemoryRestoreMode::OnDemand)\n"
+              "            ) && Path::new(\"/dev/userfaultfd\").exists()\n"
+              "            {\n"
+              "                additional_rules.push(LandlockConfig {\n"
+              '                    path: "/dev/userfaultfd".into(),\n'
+              '                    access: "rw".to_string(),\n'
+              "                });\n"
               "            }\n"
+              "\n"
+              "            vm_config\n"
+              "                .lock()\n"
+              "                .unwrap()\n"
+              "                .apply_landlock_with_additional_rules(&additional_rules)\n"
+              "                .map_err(Error::ApplyLandlock)?;\n"
               "        }\n\n"
           )
           replace_once("vmm/src/vm.rs", vm_new_anchor, vm_new_rules)
@@ -169,8 +168,9 @@ jobs:
           git add vmm/src/memory_manager.rs vmm/src/vm_config.rs vmm/src/vm.rs vmm/src/lib.rs
           git diff --cached --stat
           git commit -m 'vmm: apply Landlock before snapshot restore setup' \
-            -m 'Snapshot restore currently constructs memory and devices before applying the VM Landlock policy, so constructors can retain access to paths the same policy would deny on fresh boot.' \
-            -m 'Apply the saved VM policy at the start of snapshot Vm::new(), adding only the exact memory-ranges file needed by restore and /dev/userfaultfd when on-demand restore can use that device. This keeps memory-zone, UFFD-handler, and device construction behind the inherited restriction, then removes the old post-construction restore restriction.' \
+            -m 'Snapshot restore currently constructs memory and devices before applying the VM Landlock policy. Constructors can therefore retain access to paths that the same policy would deny on fresh boot.' \
+            -m 'Apply the saved VM policy at the start of snapshot Vm::new(), adding only the exact memory-ranges file needed by restore and /dev/userfaultfd when on-demand restore can use that device.' \
+            -m 'Memory-zone, UFFD-handler, and device construction then run behind the inherited restriction. Remove the old post-construction restore restriction so the VMM thread receives the policy once.' \
             -m 'Assisted-by: ChatGPT:GPT-5.6 Sol' \
             -m 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
 
