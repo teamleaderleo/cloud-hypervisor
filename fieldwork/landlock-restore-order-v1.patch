@@ -1,0 +1,40 @@
+diff --git a/vmm/src/vm.rs b/vmm/src/vm.rs
+--- a/vmm/src/vm.rs
++++ b/vmm/src/vm.rs
+@@ -1428,6 +1428,14 @@ impl Vm {
+                 .map_err(Error::MemoryManager)?
+             };
+ 
++        if snapshot.is_some() && vm_config.lock().unwrap().landlock_enable {
++            vm_config
++                .lock()
++                .unwrap()
++                .apply_landlock()
++                .map_err(Error::ApplyLandlock)?;
++        }
++
+         Vm::new_from_memory_manager(
+             vm_config,
+             memory_manager,
+diff --git a/vmm/src/lib.rs b/vmm/src/lib.rs
+--- a/vmm/src/lib.rs
++++ b/vmm/src/lib.rs
+@@ -2029,20 +2029,6 @@ impl Vmm {
+                     Some(memory_restore_mode),
+                 )?;
+ 
+-                if self
+-                    .vm_config
+-                    .as_ref()
+-                    .unwrap()
+-                    .lock()
+-                    .unwrap()
+-                    .landlock_enable
+-                {
+-                    let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+-                    apply_landlock(&mut config).map_err(VmError::ApplyLandlock)?;
+-                }
+-
+                 // Now we can restore the rest of the VM.
+                 // PANIC: won't panic, we just checked that the VM is there.
+                 vm.restore()?;
