@@ -1,0 +1,128 @@
+name: Linux Fieldwork materialize migration commit-point candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-migration-commit-point-r606
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-migration-commit-point-r606.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      OUT_BRANCH: linux-fieldwork/review-migration-commit-point-r606
+      ACK_LOSS_TEST: unit_tests::complete_ack_loss_is_commit_unknown
+      ACK_OK_TEST: unit_tests::complete_ok_is_committed
+      WRITE_FAIL_TEST: unit_tests::complete_write_failure_remains_rollback_safe
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CH_SHA }}
+          path: cloud-hypervisor
+          persist-credentials: true
+
+      - name: Check out exact Fieldwork candidate
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: research/ch-migration-commit-point-r606
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Pin source and toolchain
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test -z "$(git status --short)"
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          rustc --version
+
+      - name: Materialize exact reviewed safety candidate
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ../fieldwork/investigations/cloud-hypervisor-migration-commit-point/apply_commit_point_candidate.py
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          printf '%s\n' vmm/src/lib.rs vmm/src/migration/worker.rs > ../expected-files.txt
+          git diff --name-only > ../actual-files.txt
+          diff -u ../expected-files.txt ../actual-files.txt
+          git diff -- vmm/src/lib.rs vmm/src/migration/worker.rs | tee ../r606-review.diff
+
+      - name: Execute commit-boundary discriminators
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if test -e /dev/kvm; then sudo chmod a+rw /dev/kvm; fi
+          cargo test --locked -p vmm --features kvm --lib -- --list | tee ../r606-test-list.txt
+          grep -F "$ACK_LOSS_TEST: test" ../r606-test-list.txt
+          grep -F "$ACK_OK_TEST: test" ../r606-test-list.txt
+          grep -F "$WRITE_FAIL_TEST: test" ../r606-test-list.txt
+          cargo test --locked -p vmm --features kvm --lib "$ACK_LOSS_TEST" -- --exact --nocapture 2>&1 | tee ../r606-ack-loss.log
+          cargo test --locked -p vmm --features kvm --lib "$ACK_OK_TEST" -- --exact --nocapture 2>&1 | tee ../r606-ack-ok.log
+          cargo test --locked -p vmm --features kvm --lib "$WRITE_FAIL_TEST" -- --exact --nocapture 2>&1 | tee ../r606-write-fail.log
+
+      - name: Broad backend and quality gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo test --locked -p vmm --features kvm --lib 2>&1 | tee ../r606-vmm-tests.log
+          cargo check --locked -p vmm --features mshv 2>&1 | tee ../r606-mshv-check.log
+          cargo clippy --locked -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations 2>&1 | tee ../r606-kvm-clippy.log
+          cargo clippy --locked -p vmm --features mshv --lib --tests -- -D warnings -A unfulfilled-lint-expectations 2>&1 | tee ../r606-mshv-clippy.log
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --name-only > ../actual-files.txt
+          diff -u ../expected-files.txt ../actual-files.txt
+
+      - name: Commit and publish clean review branch
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git switch -c "$OUT_BRANCH"
+          git add vmm/src/lib.rs vmm/src/migration/worker.rs
+          git commit -s -m "vmm: Track migration remote-commit ambiguity" -m "Distinguish rollback-safe failures from Complete-sent/ack-unknown and acknowledged-commit failures. Suppress automatic source resurrection once remote commit may have occurred, while preserving explicit preserve-source policy. Add focused completion-state regressions." -m "Assisted-by: ChatGPT:GPT-5.6 Sol"
+          test "$(git rev-list --count "$CH_SHA"..HEAD)" = 1
+          git diff --name-only "$CH_SHA"...HEAD > ../committed-files.txt
+          diff -u ../expected-files.txt ../committed-files.txt
+          git push --force-with-lease origin "HEAD:refs/heads/$OUT_BRANCH"
+          git rev-parse HEAD | tee ../r606-review-head.txt
+          git rev-parse HEAD^{tree} | tee ../r606-review-tree.txt
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-commit-point-r606-review
+          if-no-files-found: warn
+          path: |
+            r606-review.diff
+            r606-test-list.txt
+            r606-ack-loss.log
+            r606-ack-ok.log
+            r606-write-fail.log
+            r606-vmm-tests.log
+            r606-mshv-check.log
+            r606-kvm-clippy.log
+            r606-mshv-clippy.log
+            r606-review-head.txt
+            r606-review-tree.txt
