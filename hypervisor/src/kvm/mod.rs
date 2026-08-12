@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::mem::offset_of;
 #[cfg(feature = "sev_snp")]
 use std::num;
+use std::num::NonZeroU64;
 #[cfg(feature = "sev_snp")]
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
@@ -1479,6 +1480,16 @@ impl vm::Vm for KvmVm {
         }
 
         Ok(())
+    }
+
+    /// Return the page size represented by each KVM dirty-log bitmap bit.
+    fn dirty_log_page_size(&self) -> vm::Result<NonZeroU64> {
+        // SAFETY: FFI call. Trivially safe.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size =
+            u64::try_from(page_size).map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))?;
+        NonZeroU64::new(page_size)
+            .ok_or_else(|| vm::HypervisorVmError::GetDirtyLog(anyhow!("Host page size is zero")))
     }
 
     ///

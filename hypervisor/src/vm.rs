@@ -13,6 +13,7 @@
 use std::any::Any;
 #[cfg(any(feature = "sev_snp", feature = "tdx"))]
 use std::io;
+use std::num::NonZeroU64;
 use std::result;
 use std::sync::Arc;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -440,6 +441,8 @@ pub trait Vm: Send + Sync + Any {
     fn start_dirty_log(&self) -> Result<()>;
     /// Stop logging dirty pages
     fn stop_dirty_log(&self) -> Result<()>;
+    /// Return the page size represented by each dirty-log bitmap bit.
+    fn dirty_log_page_size(&self) -> Result<NonZeroU64>;
     /// Get dirty pages bitmap
     fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
     #[cfg(feature = "sev_snp")]

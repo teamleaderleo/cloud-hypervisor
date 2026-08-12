@@ -3390,6 +3390,20 @@ impl Transportable for MemoryManager {
     }
 }
 
+fn dirty_bitmap_to_range_table(
+    vm_dirty_bitmap: &[u64],
+    vmm_dirty_bitmap: &[u64],
+    start_addr: u64,
+    page_size: u64,
+) -> MemoryRangeTable {
+    let dirty_bitmap = vm_dirty_bitmap
+        .iter()
+        .zip(vmm_dirty_bitmap.iter())
+        .map(|(x, y)| x | y);
+
+    MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, start_addr, page_size)
+}
+
 impl Migratable for MemoryManager {
     // Start the dirty log in the hypervisor (kvm/mshv).
     // Also, reset the dirty bitmap logged by the vmm.
@@ -3421,6 +3435,12 @@ impl Migratable for MemoryManager {
     // together in the table if they are contiguous.
     fn dirty_log(&mut self) -> result::Result<MemoryRangeTable, MigratableError> {
         let mut table = MemoryRangeTable::default();
+        let dirty_log_page_size = self
+            .vm
+            .dirty_log_page_size()
+            .context("Error getting VM dirty log page size")
+            .map_err(MigratableError::MigrateSend)?
+            .get();
         for r in &self.guest_ram_mappings {
             let vm_dirty_bitmap = self
                 .vm
@@ -3442,12 +3462,12 @@ impl Migratable for MemoryManager {
                 }
             };
 
-            let dirty_bitmap = vm_dirty_bitmap
-                .iter()
-                .zip(vmm_dirty_bitmap.iter())
-                .map(|(x, y)| x | y);
-
-            let sub_table = MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, r.gpa, 4096);
+            let sub_table = dirty_bitmap_to_range_table(
+                &vm_dirty_bitmap,
+                &vmm_dirty_bitmap,
+                r.gpa,
+                dirty_log_page_size,
+            );
 
             if sub_table.regions().is_empty() {
                 debug!("Dirty Memory Range Table is empty");
@@ -3461,5 +3481,42 @@ impl Migratable for MemoryManager {
             table.extend(sub_table);
         }
         Ok(table)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dirty_bitmap_to_range_table;
+
+    const BASE_GPA: u64 = 0x4000_0000;
+
+    #[test]
+    fn test_dirty_bitmap_page_granules() {
+        for (page_size, expected_gpa) in [
+            (0x1000, 0x4000_1000),
+            (0x4000, 0x4000_4000),
+            (0x1_0000, 0x4001_0000),
+        ] {
+            let table = dirty_bitmap_to_range_table(&[0b10], &[0], BASE_GPA, page_size);
+            assert_eq!(table.regions().len(), 1);
+            assert_eq!(table.regions()[0].gpa, expected_gpa);
+            assert_eq!(table.regions()[0].length, page_size);
+        }
+    }
+
+    #[test]
+    fn test_dirty_bitmap_combines_sources_and_coalesces() {
+        let table = dirty_bitmap_to_range_table(&[0b0010], &[0b0100], BASE_GPA, 0x4000);
+        assert_eq!(table.regions().len(), 1);
+        assert_eq!(table.regions()[0].gpa, 0x4000_4000);
+        assert_eq!(table.regions()[0].length, 0x8000);
+    }
+
+    #[test]
+    fn test_dirty_bitmap_coalesces_across_words() {
+        let table = dirty_bitmap_to_range_table(&[1u64 << 63, 0], &[0, 1], BASE_GPA, 0x1_0000);
+        assert_eq!(table.regions().len(), 1);
+        assert_eq!(table.regions()[0].gpa, 0x403f_0000);
+        assert_eq!(table.regions()[0].length, 0x2_0000);
     }
 }

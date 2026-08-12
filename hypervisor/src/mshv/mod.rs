@@ -5,6 +5,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 #[cfg(feature = "sev_snp")]
 use std::num::NonZeroUsize;
 #[cfg(feature = "sev_snp")]
@@ -2193,6 +2194,13 @@ impl vm::Vm for MshvVm {
             .disable_dirty_page_tracking()
             .map_err(|e| vm::HypervisorVmError::StartDirtyLog(e.into()))?;
         Ok(())
+    }
+
+    /// Return the page size represented by each MSHV dirty-log bitmap bit.
+    fn dirty_log_page_size(&self) -> vm::Result<NonZeroU64> {
+        NonZeroU64::new(1u64 << PAGE_SHIFT).ok_or_else(|| {
+            vm::HypervisorVmError::GetDirtyLog(anyhow!("MSHV dirty-log page size is zero"))
+        })
     }
 
     ///
