@@ -41,6 +41,12 @@ jobs:
 
           replace_once(
               "hypervisor/src/vm.rs",
+              "NonZeroU64 import",
+              "use std::any::Any;",
+              lines("use std::any::Any;", "use std::num::NonZeroU64;"),
+          )
+          replace_once(
+              "hypervisor/src/vm.rs",
               "Vm trait",
               lines(
                   "    /// Get dirty pages bitmap",
@@ -48,7 +54,7 @@ jobs:
               ),
               lines(
                   "    /// Return the page size represented by each dirty-log bitmap bit.",
-                  "    fn dirty_log_page_size(&self) -> u64;",
+                  "    fn dirty_log_page_size(&self) -> Result<NonZeroU64>;",
                   "    /// Get dirty pages bitmap",
                   "    fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;",
               ),
@@ -64,9 +70,14 @@ jobs:
               ),
               lines(
                   "    /// Return the page size represented by each KVM dirty-log bitmap bit.",
-                  "    fn dirty_log_page_size(&self) -> u64 {",
+                  "    fn dirty_log_page_size(&self) -> vm::Result<std::num::NonZeroU64> {",
                   "        // SAFETY: FFI call. Trivially safe.",
-                  "        unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }",
+                  "        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };",
+                  "        let page_size = u64::try_from(page_size)",
+                  "            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))?;",
+                  "        std::num::NonZeroU64::new(page_size).ok_or_else(|| {",
+                  "            vm::HypervisorVmError::GetDirtyLog(anyhow!(\"Host page size is zero\"))",
+                  "        })",
                   "    }",
                   "",
                   "    ///",
@@ -86,8 +97,8 @@ jobs:
               ),
               lines(
                   "    /// Return the page size represented by each MSHV dirty-log bitmap bit.",
-                  "    fn dirty_log_page_size(&self) -> u64 {",
-                  "        1u64 << PAGE_SHIFT",
+                  "    fn dirty_log_page_size(&self) -> vm::Result<std::num::NonZeroU64> {",
+                  "        Ok(std::num::NonZeroU64::new(1u64 << PAGE_SHIFT).unwrap())",
                   "    }",
                   "",
                   "    ///",
@@ -129,7 +140,12 @@ jobs:
               lines(
                   "    fn dirty_log(&mut self) -> result::Result<MemoryRangeTable, MigratableError> {",
                   "        let mut table = MemoryRangeTable::default();",
-                  "        let dirty_log_page_size = self.vm.dirty_log_page_size();",
+                  "        let dirty_log_page_size = self",
+                  "            .vm",
+                  "            .dirty_log_page_size()",
+                  "            .context(\"Error getting VM dirty log page size\")",
+                  "            .map_err(MigratableError::MigrateSend)?",
+                  "            .get();",
                   "        for r in &self.guest_ram_mappings {",
               ),
           )
@@ -203,9 +219,11 @@ jobs:
           p.write_text(p.read_text() + tests)
           PY
 
-      - name: Install formatting and cross target
+      - name: Install formatting and cross toolchain
         shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-x86-64-linux-gnu
           rustup toolchain install nightly --profile minimal --component rustfmt
           rustup target add x86_64-unknown-linux-gnu
 
@@ -264,10 +282,10 @@ jobs:
           git add hypervisor/src/kvm/mod.rs hypervisor/src/mshv/mod.rs hypervisor/src/vm.rs vmm/src/memory_manager.rs
           git commit \
             -m 'vmm: Use backend dirty log page size' \
-            -m 'KVM dirty bitmap bits follow the host base page size. Carry that page size from the hypervisor backend into migration range conversion so 16K and 64K KVM hosts address the correct guest pages.' \
+            -m 'KVM dirty bitmap bits follow the host base page size. Carry a validated non-zero page size from the hypervisor backend into migration range conversion so 16K and 64K KVM hosts address the correct guest pages.' \
             -m 'Keep MSHV fixed at its existing 4K dirty-log unit and cover 4K, 16K, 64K, source merging, and adjacent-bit coalescing with synthetic unit tests.' \
             -m 'Assisted-by: ChatGPT:GPT-5.6 Sol'
           test "$(git rev-list --count 1af93ac7035cda77cd87b0c18b1134ebb0928052..HEAD)" = 1
           git show --stat --oneline --decorate HEAD
           git remote add fieldwork "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push fieldwork HEAD:refs/heads/linux-fieldwork/kvm-dirty-log-granule-candidate
+          git push fieldwork HEAD:refs/heads/linux-fieldwork/kvm-dirty-log-granule-typed-candidate
