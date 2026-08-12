@@ -5,6 +5,10 @@ on:
     branches:
       - fieldwork/kvm-dirty-log-granule-repair-v2
 
+concurrency:
+  group: fieldwork-kvm-dirty-log-granule-repair-v2
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
