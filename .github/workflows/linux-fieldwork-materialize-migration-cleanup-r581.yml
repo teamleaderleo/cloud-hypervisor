@@ -1,0 +1,181 @@
+name: Linux Fieldwork materialize migration cleanup candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-migration-cleanup-r581
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-migration-cleanup-r581.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      OUT_BRANCH: linux-fieldwork/review-migration-cleanup-r581
+      TEST: migration::transport::sender_cleanup_review_tests::full_queue_cleanup_closes_channel_and_joins
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CH_SHA }}
+          path: cloud-hypervisor
+          persist-credentials: true
+
+      - name: Pin source and toolchain
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test -z "$(git status --short)"
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          rustc --version
+
+      - name: Materialize exact reviewed cleanup candidate and regression
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('vmm/src/migration/transport.rs')
+          s = p.read_text()
+
+          old = 'use std::io::{self, ErrorKind, Read, Write};\n'
+          new = old + 'use std::mem;\n'
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''            let message = message_rx\n                .lock()\n                .map_err(|_| MigratableError::MigrateSend(anyhow!("message_rx mutex is poisoned")))\n                .inspect_err(|_| {\n                    worker_error.store(true, Ordering::Relaxed);\n                    // We ignore errors during error handling.\n                    notify_tx.send(SendMemoryThreadNotify::Error).ok();\n                })?\n                .recv()\n                .context("Error receiving message from main thread")\n                .map_err(MigratableError::MigrateSend)\n                .inspect_err(|_| {\n                    worker_error.store(true, Ordering::Relaxed);\n                    notify_tx.send(SendMemoryThreadNotify::Error).ok();\n                })?;\n'''
+          new = '''            let message_rx = message_rx\n                .lock()\n                .map_err(|_| MigratableError::MigrateSend(anyhow!("message_rx mutex is poisoned")))\n                .inspect_err(|_| {\n                    worker_error.store(true, Ordering::Relaxed);\n                    // We ignore errors during error handling.\n                    notify_tx.send(SendMemoryThreadNotify::Error).ok();\n                })?;\n            let message = match message_rx.recv() {\n                Ok(message) => message,\n                // The main thread closes the work channel as the guaranteed terminal\n                // condition during cleanup. Queued work is drained before this point.\n                Err(_) => return Ok(()),\n            };\n'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''        // Send disconnect messages to all workers.\n        for _ in 0..self.threads.len() {\n            // All threads may have terminated, leading to a dropped receiver. Thus we ignore\n            // errors here.\n            self.message_tx\n                .try_send(SendMemoryThreadMessage::Disconnect)\n                .ok();\n        }\n'''
+          new = '''        // Closing the work channel is independent of bounded-queue capacity. Workers\n        // drain already queued work and then receive the terminal disconnect state.\n        let (closed_tx, closed_rx) = sync_channel(0);\n        drop(closed_rx);\n        let message_tx = mem::replace(&mut self.message_tx, closed_tx);\n        drop(message_tx);\n'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          anchor = '#[cfg(test)]\nmod tests {'
+          assert s.count(anchor) == 1
+          tests = r'''#[cfg(test)]
+          mod sender_cleanup_review_tests {
+              use std::sync::Arc;
+              use std::sync::atomic::AtomicBool;
+              use std::sync::mpsc::{channel, sync_channel};
+              use std::thread;
+              use std::time::Duration;
+
+              use vm_migration::MigratableError;
+              use vm_migration::protocol::MemoryRangeTable;
+
+              use super::{
+                  GuestAddress, GuestMemoryAtomic, GuestMemoryMmap, SendAdditionalConnections,
+                  SendMemoryThreadMessage,
+              };
+
+              fn guest_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
+                  GuestMemoryAtomic::new(
+                      GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap(),
+                  )
+              }
+
+              #[test]
+              fn full_queue_cleanup_closes_channel_and_joins() {
+                  let (message_tx, message_rx) = sync_channel(1);
+                  message_tx
+                      .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
+                      .unwrap();
+                  let (_notify_tx, notify_rx) = channel();
+                  let worker = thread::spawn(move || -> Result<(), MigratableError> {
+                      thread::sleep(Duration::from_millis(20));
+                      assert!(matches!(
+                          message_rx.recv().unwrap(),
+                          SendMemoryThreadMessage::Memory(_)
+                      ));
+                      message_rx.recv().unwrap_err();
+                      Ok(())
+                  });
+
+                  let mut connections = SendAdditionalConnections {
+                      guest_memory: guest_memory(),
+                      threads: vec![worker],
+                      message_tx,
+                      worker_error: Arc::new(AtomicBool::new(false)),
+                      notify_rx,
+                  };
+
+                  connections.cleanup().unwrap();
+                  assert!(connections.threads.is_empty());
+              }
+          }
+
+          '''
+          s = s.replace(anchor, tests + anchor, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/migration/transport.rs"
+          git diff -- vmm/src/migration/transport.rs | tee ../r581-review.diff
+
+      - name: Execute focused and broad VMM gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if test -e /dev/kvm; then sudo chmod a+rw /dev/kvm; fi
+          cargo test --locked -p vmm --features kvm --lib -- --list | tee ../r581-test-list.txt
+          grep -F "$TEST: test" ../r581-test-list.txt
+          timeout --signal=TERM --kill-after=2s 10s cargo test --locked -p vmm --features kvm --lib "$TEST" -- --exact --nocapture 2>&1 | tee ../r581-focused.log
+          cargo test --locked -p vmm --features kvm --lib 2>&1 | tee ../r581-vmm-tests.log
+
+      - name: Quality gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo clippy --locked -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations 2>&1 | tee ../r581-clippy.log
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/migration/transport.rs"
+
+      - name: Commit and publish clean review branch
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git switch -c "$OUT_BRANCH"
+          git add vmm/src/migration/transport.rs
+          git commit -s -m "vmm: Close migration work channel during cleanup" -m "Make channel closure the sender workers' capacity-independent terminal condition so cleanup cannot lose Disconnect messages on a full bounded queue and then block joining survivors. Add a full-queue cleanup regression." -m "Assisted-by: ChatGPT:GPT-5.6 Sol"
+          test "$(git rev-list --count "$CH_SHA"..HEAD)" = 1
+          test "$(git diff --name-only "$CH_SHA"...HEAD)" = "vmm/src/migration/transport.rs"
+          git push --force-with-lease origin "HEAD:refs/heads/$OUT_BRANCH"
+          git rev-parse HEAD | tee ../r581-review-head.txt
+          git rev-parse HEAD^{tree} | tee ../r581-review-tree.txt
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-cleanup-r581-review
+          if-no-files-found: warn
+          path: |
+            r581-review.diff
+            r581-test-list.txt
+            r581-focused.log
+            r581-vmm-tests.log
+            r581-clippy.log
+            r581-review-head.txt
+            r581-review-tree.txt
