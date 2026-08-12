@@ -30,3 +30,16 @@ replace_once(
     "bytes_per_bit: std::num::NonZeroU64::new(1u64 << PAGE_SHIFT).unwrap(),",
     "bytes_per_bit: NonZeroU64::new(1u64 << PAGE_SHIFT).unwrap(),",
 )
+
+replace_once(
+    "vmm/src/memory_manager.rs",
+    "    use hypervisor::DirtyLog;\n\n    use super::dirty_bitmap_to_range_table;\n",
+    "    use hypervisor::DirtyLog;\n    use vm_migration::protocol::MemoryRange;\n\n    use super::dirty_bitmap_to_range_table;\n",
+)
+
+path = Path("vmm/src/memory_manager.rs")
+text = path.read_text()
+old = "vm_migration::protocol::MemoryRange"
+if text.count(old) != 2:
+    raise SystemExit(f"expected two fully-qualified MemoryRange uses, found {text.count(old)}")
+path.write_text(text.replace(old, "MemoryRange"))
