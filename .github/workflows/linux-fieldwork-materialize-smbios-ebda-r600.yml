@@ -1,0 +1,128 @@
+name: Linux Fieldwork materialize SMBIOS EBDA candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-smbios-ebda-r600
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-smbios-ebda-r600.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      OUT_BRANCH: linux-fieldwork/review-smbios-ebda-r600
+      TEST: x86_64::smbios::unit_tests::smbios_payload_cannot_cross_into_high_ram
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CH_SHA }}
+          path: cloud-hypervisor
+          persist-credentials: true
+
+      - name: Pin source and toolchain
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test -z "$(git status --short)"
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          rustc --version
+
+      - name: Materialize exact reviewed candidate
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('arch/src/x86_64/smbios.rs')
+          s = p.read_text()
+
+          old = 'use crate::layout::SMBIOS_START;'
+          new = 'use crate::layout::{HIGH_RAM_START, SMBIOS_START};'
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''    /// SMBIOS string index overflow (u8 limit reached).\n    #[error("SMBIOS string index overflow (u8 limit reached: {})", u8::MAX)]\n    TooManyStrings,\n}'''
+          new = '''    /// SMBIOS string index overflow (u8 limit reached).\n    #[error("SMBIOS string index overflow (u8 limit reached: {})", u8::MAX)]\n    TooManyStrings,\n    /// The SMBIOS payload would extend beyond the reserved EBDA into high RAM.\n    #[error("SMBIOS payload exceeds the reserved EBDA range")]\n    SmbiosTooLarge,\n}'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''fn write_and_incr<T: ByteValued>(\n    mem: &GuestMemoryMmap,\n    val: T,\n    mut curptr: GuestAddress,\n) -> Result<GuestAddress> {\n    mem.write_obj(val, curptr).map_err(Error::WriteData)?;\n    curptr = curptr\n        .checked_add(size_of::<T>() as u64)\n        .ok_or(Error::NotEnoughMemory)?;\n    Ok(curptr)\n}\n'''
+          new = '''fn write_and_incr<T: ByteValued>(\n    mem: &GuestMemoryMmap,\n    val: T,\n    mut curptr: GuestAddress,\n) -> Result<GuestAddress> {\n    let end = curptr\n        .checked_add(size_of::<T>() as u64)\n        .ok_or(Error::NotEnoughMemory)?;\n    if end > HIGH_RAM_START {\n        return Err(Error::SmbiosTooLarge);\n    }\n    mem.write_obj(val, curptr).map_err(Error::WriteData)?;\n    curptr = end;\n    Ok(curptr)\n}\n'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          anchor = '''    #[test]\n    fn smbios_uuid_invalid_rejected() {\n'''
+          test = '''    #[test]\n    fn smbios_payload_cannot_cross_into_high_ram() {\n        const SENTINEL_LEN: usize = 64;\n        let ebda_tail = HIGH_RAM_START.raw_value() - SMBIOS_START;\n        let mem = GuestMemoryMmap::from_ranges(&[(\n            GuestAddress(SMBIOS_START),\n            ebda_tail as usize + 0x20_000,\n        )])\n        .unwrap();\n        mem.write_slice(&[0xFE; SENTINEL_LEN], HIGH_RAM_START)\n            .unwrap();\n\n        let smbios = SmbiosConfig {\n            system: Some(SmbiosSystem {\n                manufacturer: Some("A".repeat(70 * 1024)),\n                ..Default::default()\n            }),\n            ..Default::default()\n        };\n\n        let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();\n        assert!(matches!(err, Error::SmbiosTooLarge));\n\n        let mut sentinel = [0u8; SENTINEL_LEN];\n        mem.read_slice(&mut sentinel, HIGH_RAM_START).unwrap();\n        assert_eq!(sentinel, [0xFE; SENTINEL_LEN]);\n    }\n\n'''
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, test + anchor, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/x86_64/smbios.rs"
+          git diff -- arch/src/x86_64/smbios.rs | tee ../r600-review.diff
+
+      - name: Execute focused and full arch tests
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo test --locked -p arch --features kvm --lib -- --list | tee ../r600-test-list.txt
+          grep -F "$TEST: test" ../r600-test-list.txt
+          cargo test --locked -p arch --features kvm --lib "$TEST" -- --exact --nocapture 2>&1 | tee ../r600-focused.log
+          cargo test --locked -p arch --features kvm --lib 2>&1 | tee ../r600-arch-suite.log
+
+      - name: Quality gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo clippy --locked -p arch --features kvm --all-targets -- -D warnings 2>&1 | tee ../r600-clippy.log
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/x86_64/smbios.rs"
+
+      - name: Commit and publish clean review branch
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git switch -c "$OUT_BRANCH"
+          git add arch/src/x86_64/smbios.rs
+          git commit -s -m "arch: Bound x86 SMBIOS to reserved low memory" -m "Reject SMBIOS writes that would cross HIGH_RAM_START so oversized platform strings cannot overwrite guest high RAM. Add a focused high-RAM sentinel regression." -m "Assisted-by: ChatGPT:GPT-5.6 Sol"
+          test "$(git rev-list --count "$CH_SHA"..HEAD)" = 1
+          test "$(git diff --name-only "$CH_SHA"...HEAD)" = "arch/src/x86_64/smbios.rs"
+          git push --force-with-lease origin "HEAD:refs/heads/$OUT_BRANCH"
+          git rev-parse HEAD | tee ../r600-review-head.txt
+          git rev-parse HEAD^{tree} | tee ../r600-review-tree.txt
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smbios-ebda-r600-review
+          if-no-files-found: warn
+          path: |
+            r600-review.diff
+            r600-test-list.txt
+            r600-focused.log
+            r600-arch-suite.log
+            r600-clippy.log
+            r600-review-head.txt
+            r600-review-tree.txt
