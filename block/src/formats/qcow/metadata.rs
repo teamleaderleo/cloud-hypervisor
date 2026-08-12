@@ -561,17 +561,15 @@ impl QcowState {
         };
         let l2_index = self.l2_table_index(address) as usize;
 
-        let mut set_refcounts = Vec::new();
+        let mut deferred_unrefs = Vec::new();
 
-        if let Some(new_addr) = self.cache_l2_cluster_alloc(l1_index, l2_addr_disk)? {
-            set_refcounts.push((new_addr, 1));
-        }
+        self.cache_l2_cluster_alloc(l1_index, l2_addr_disk)?;
 
         let l2_entry = self.l2_cache.get(l1_index).unwrap()[l2_index];
         let cluster_addr = if l2_entry_is_compressed(l2_entry) {
             let decompressed_cluster = self.decompress_l2_cluster(l2_entry)?;
             let cluster_addr = self.append_data_cluster(None)?;
-            self.update_cluster_addr(l1_index, l2_index, cluster_addr, &mut set_refcounts)?;
+            self.update_cluster_addr(l1_index, l2_index, cluster_addr, &mut deferred_unrefs)?;
             let nwritten = self
                 .raw_file
                 .file_mut()
@@ -588,7 +586,7 @@ impl QcowState {
             } else {
                 self.append_data_cluster(backing_data)?
             };
-            self.update_cluster_addr(l1_index, l2_index, cluster_addr, &mut set_refcounts)?;
+            self.update_cluster_addr(l1_index, l2_index, cluster_addr, &mut deferred_unrefs)?;
             cluster_addr
         } else {
             let cluster_addr = l2_entry_std_cluster_addr(l2_entry);
@@ -596,9 +594,9 @@ impl QcowState {
             cluster_addr
         };
 
-        // Apply deferred refcount updates
-        for (addr, refcount) in set_refcounts {
-            self.set_cluster_refcount_track_freed(addr, refcount)?;
+        // Apply deferred L2 releases
+        for addr in deferred_unrefs {
+            self.set_cluster_refcount_track_freed(addr, 0)?;
         }
 
         let intra_offset = self.raw_file.cluster_offset(address);
@@ -649,18 +647,13 @@ impl QcowState {
     }
 
     /// Populates the L2 cache for write operations and may allocate a new
-    /// L2 table. Returns the address of the newly allocated cluster if any.
-    fn cache_l2_cluster_alloc(
-        &mut self,
-        l1_index: usize,
-        l2_addr_disk: u64,
-    ) -> io::Result<Option<u64>> {
-        let mut new_cluster: Option<u64> = None;
+    /// L2 table, establishing its refcount ownership before L1 can reference it.
+    fn cache_l2_cluster_alloc(&mut self, l1_index: usize, l2_addr_disk: u64) -> io::Result<()> {
         if !self.l2_cache.contains_key(l1_index) {
             let l2_table = if l2_addr_disk == 0 {
-                // Allocate a new cluster to store the L2 table
+                // Allocate and own the new L2 table before publishing it through L1.
                 let new_addr = self.get_new_cluster(None)?;
-                new_cluster = Some(new_addr);
+                self.set_cluster_refcount_track_freed(new_addr, 1)?;
                 self.l1_table[l1_index] = new_addr;
                 VecCache::new(self.l2_entries as usize)
             } else {
@@ -673,7 +666,7 @@ impl QcowState {
                 raw_file.write_pointer_table_direct(l1_table[index], evicted.iter())
             })?;
         }
-        Ok(new_cluster)
+        Ok(())
     }
 
     /// Allocates a new cluster from the free list or by extending the file.
@@ -731,7 +724,7 @@ impl QcowState {
         l1_index: usize,
         l2_index: usize,
         cluster_addr: u64,
-        set_refcounts: &mut Vec<(u64, u64)>,
+        deferred_unrefs: &mut Vec<u64>,
     ) -> io::Result<()> {
         if !self.l2_cache.get(l1_index).unwrap().dirty() {
             // Allocate the new cluster for the relocated L2 table before
@@ -741,7 +734,7 @@ impl QcowState {
             // live L2 table (issue #8606). The cluster will be written when
             // the cache is flushed.
             let new_addr = self.get_new_cluster(None)?;
-            set_refcounts.push((new_addr, 1));
+            self.set_cluster_refcount_track_freed(new_addr, 1)?;
 
             // Free the previously used cluster if one exists. Modified tables are always
             // written to new clusters so the L1 table can be committed to disk after they
@@ -749,7 +742,7 @@ impl QcowState {
             let addr = self.l1_table[l1_index];
             if addr != 0 {
                 self.unref_clusters.push(addr);
-                set_refcounts.push((addr, 0));
+                deferred_unrefs.push(addr);
             }
 
             self.l1_table[l1_index] = new_addr; // marks l1_table dirty via IndexMut
@@ -894,9 +887,7 @@ impl QcowState {
 
         if l2_addr_disk == 0 {
             if zero_marker {
-                if let Some(new_addr) = self.cache_l2_cluster_alloc(l1_index, l2_addr_disk)? {
-                    self.set_cluster_refcount_track_freed(new_addr, 1)?;
-                }
+                self.cache_l2_cluster_alloc(l1_index, l2_addr_disk)?;
                 self.l2_cache.get_mut(l1_index).unwrap()[l2_index] = dealloc_entry;
             }
             return Ok(None);
@@ -1305,5 +1296,166 @@ mod unit_tests {
             !inner.unref_clusters.contains(&live_l2) && !inner.avail_clusters.contains(&live_l2),
             "a still-referenced L2 table must never enter the free lists"
         );
+    }
+
+    #[test]
+    fn fresh_l2_enospc_reopen_does_not_reuse_live_table() {
+        let cluster_size: u64 = 1 << 16;
+        let temp = super::super::QcowTempDisk::new(4 * cluster_size, None, false, true, false)
+            .unwrap()
+            .into_tempfile();
+        let raw = crate::AlignedFile::new(temp.as_file().try_clone().unwrap(), false);
+        let (mut inner, _backing, _sparse) =
+            super::super::parser::parse_qcow(raw, 0, true).unwrap();
+        assert_eq!(inner.l1_table[0], 0);
+
+        // Add exactly two addressable clusters and cap file growth there. On
+        // baseline the fresh L2 consumes the higher cluster, the data/refcount
+        // path consumes the lower one, and ENOSPC drops the deferred L2 owner.
+        // With ownership-before-publication the lower cluster can instead be
+        // consumed by refcount-block relocation before data allocation fails.
+        let file_size = inner.raw_file.file_mut().metadata().unwrap().len();
+        assert_eq!(file_size % cluster_size, 0);
+        inner
+            .raw_file
+            .file_mut()
+            .set_len(file_size + 2 * cluster_size)
+            .unwrap();
+        let file_clusters = (file_size + 2 * cluster_size) / cluster_size;
+        inner.refcounts = super::super::refcount::RefCount::new(
+            &mut inner.raw_file,
+            inner.header.refcount_table_offset,
+            1,
+            file_clusters,
+            cluster_size,
+            16,
+        )
+        .unwrap();
+        inner.avail_clusters.clear();
+        inner.unref_clusters.clear();
+        inner.avail_clusters.push(file_size);
+        inner.avail_clusters.push(file_size + cluster_size);
+
+        let err = inner
+            .map_write(0, None)
+            .expect_err("allocator exhaustion must fail the first write");
+        assert_eq!(err.raw_os_error(), Some(libc::ENOSPC));
+
+        let live_l2 = inner.l1_table[0];
+        assert_ne!(live_l2, 0, "the failed write must have wired a fresh L2");
+
+        drop(super::QcowMetadata::new(inner));
+
+        let raw = crate::AlignedFile::new(temp.as_file().try_clone().unwrap(), false);
+        let (mut reopened, _backing, _sparse) =
+            super::super::parser::parse_qcow(raw, 0, true).unwrap();
+        assert_eq!(reopened.l1_table[0], live_l2);
+
+        let live_refcount = {
+            let super::QcowState {
+                refcounts,
+                raw_file,
+                ..
+            } = &mut reopened;
+            refcounts.get_cluster_refcount(raw_file, live_l2).unwrap()
+        };
+        let live_marked_free = reopened.avail_clusters.contains(&live_l2);
+        let next_allocation = reopened
+            .get_new_cluster(None)
+            .expect("reopen should retain at least one reusable cluster");
+
+        assert_ne!(
+            next_allocation, live_l2,
+            "clean reopen allocator must not return a still-referenced L2 cluster"
+        );
+        assert!(
+            !live_marked_free,
+            "clean reopen must keep a referenced fresh L2 out of the free list"
+        );
+        assert_eq!(
+            live_refcount, 1,
+            "clean reopen must retain ownership for the referenced fresh L2"
+        );
+    }
+
+    #[test]
+    fn relocated_l2_dropped_deferred_updates_keeps_refcount_owner() {
+        let cluster_size: u64 = 1 << 16;
+        let temp = super::super::QcowTempDisk::new(64 * cluster_size, None, false, true, false)
+            .unwrap()
+            .into_tempfile();
+        let raw = crate::AlignedFile::new(temp.as_file().try_clone().unwrap(), false);
+        let (mut inner, _backing, _sparse) =
+            super::super::parser::parse_qcow(raw, 0, true).unwrap();
+
+        inner.map_write(0, None).expect("initial write");
+        inner.sync_caches().expect("make the current L2 clean");
+        let old_l2 = inner.l1_table[0];
+        assert_ne!(old_l2, 0);
+
+        let data_cluster = inner.append_data_cluster(None).expect("new data cluster");
+        let mut deferred_unrefs = Vec::new();
+        inner
+            .update_cluster_addr(0, 1, data_cluster, &mut deferred_unrefs)
+            .expect("relocate clean L2");
+        let relocated_l2 = inner.l1_table[0];
+        assert_ne!(relocated_l2, 0);
+        assert_ne!(relocated_l2, old_l2);
+
+        // Model a caller error after L1 publication by dropping map_write's
+        // local deferred vector before it can apply refcount updates.
+        assert_eq!(deferred_unrefs, vec![old_l2]);
+        drop(deferred_unrefs);
+        drop(super::QcowMetadata::new(inner));
+
+        let raw = crate::AlignedFile::new(temp.as_file().try_clone().unwrap(), false);
+        let (mut reopened, _backing, _sparse) =
+            super::super::parser::parse_qcow(raw, 0, true).unwrap();
+        assert_eq!(reopened.l1_table[0], relocated_l2);
+        let relocated_refcount = {
+            let super::QcowState {
+                refcounts,
+                raw_file,
+                ..
+            } = &mut reopened;
+            refcounts
+                .get_cluster_refcount(raw_file, relocated_l2)
+                .unwrap()
+        };
+        assert_eq!(
+            relocated_refcount, 1,
+            "clean reopen must retain ownership for the published relocated L2"
+        );
+        assert!(
+            !reopened.avail_clusters.contains(&relocated_l2),
+            "clean reopen must keep the published relocated L2 out of the free list"
+        );
+    }
+
+    #[test]
+    fn zero_marker_fresh_l2_keeps_refcount_owner() {
+        let cluster_size: u64 = 1 << 16;
+        let temp = super::super::QcowTempDisk::new(4 * cluster_size, None, false, true, false)
+            .unwrap()
+            .into_tempfile();
+        let raw = crate::AlignedFile::new(temp.as_file().try_clone().unwrap(), false);
+        let (mut inner, _backing, _sparse) =
+            super::super::parser::parse_qcow(raw, 0, true).unwrap();
+        assert_eq!(inner.l1_table[0], 0);
+
+        inner
+            .deallocate_cluster(0, true, true)
+            .expect("zero-marker deallocation must allocate its metadata table");
+        let live_l2 = inner.l1_table[0];
+        assert_ne!(live_l2, 0);
+        let refcount = {
+            let super::QcowState {
+                refcounts,
+                raw_file,
+                ..
+            } = &mut inner;
+            refcounts.get_cluster_refcount(raw_file, live_l2).unwrap()
+        };
+        assert_eq!(refcount, 1);
     }
 }
