@@ -38,43 +38,35 @@ jobs:
                   )
               file_path.write_text(text.replace(old, new, 1))
 
-          replace_once(
-              "vmm/src/vm.rs",
-              """            };
-
-          Vm::new_from_memory_manager(
-          """,
-              """            };
-
-          if snapshot.is_some() && vm_config.lock().unwrap().landlock_enable {
-              vm_config
-                  .lock()
-                  .unwrap()
-                  .apply_landlock()
-                  .map_err(Error::ApplyLandlock)?;
-          }
-
-          Vm::new_from_memory_manager(
-          """,
+          vm_anchor = "        Vm::new_from_memory_manager(\n"
+          vm_replacement = (
+              "        if snapshot.is_some() && vm_config.lock().unwrap().landlock_enable {\n"
+              "            vm_config\n"
+              "                .lock()\n"
+              "                .unwrap()\n"
+              "                .apply_landlock()\n"
+              "                .map_err(Error::ApplyLandlock)?;\n"
+              "        }\n"
+              "\n"
+              "        Vm::new_from_memory_manager(\n"
           )
+          replace_once("vmm/src/vm.rs", vm_anchor, vm_replacement)
 
-          replace_once(
-              "vmm/src/lib.rs",
-              """                if self
-                      .vm_config
-                      .as_ref()
-                      .unwrap()
-                      .lock()
-                      .unwrap()
-                      .landlock_enable
-                  {
-                      let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                      apply_landlock(&mut config).map_err(VmError::ApplyLandlock)?;
-                  }
-
-          """,
-              "",
+          restore_block = (
+              "                if self\n"
+              "                    .vm_config\n"
+              "                    .as_ref()\n"
+              "                    .unwrap()\n"
+              "                    .lock()\n"
+              "                    .unwrap()\n"
+              "                    .landlock_enable\n"
+              "                {\n"
+              "                    let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();\n"
+              "                    apply_landlock(&mut config).map_err(VmError::ApplyLandlock)?;\n"
+              "                }\n"
+              "\n"
           )
+          replace_once("vmm/src/lib.rs", restore_block, "")
           PY
 
           git diff --check
