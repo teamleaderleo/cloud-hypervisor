@@ -29,9 +29,14 @@ jobs:
           git remote add fieldwork-read "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch --depth=1 fieldwork-read fieldwork/kvm-dirty-log-granule-repair-v2
           git show FETCH_HEAD:.github/fieldwork/apply-dirty-log-repair-v2.py > /tmp/apply-dirty-log-repair-v2.py
+          git show FETCH_HEAD:.github/fieldwork/fix-dirty-log-oracle-v2.py > /tmp/fix-dirty-log-oracle-v2.py
 
       - name: Apply repaired candidate
-        run: python3 /tmp/apply-dirty-log-repair-v2.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 /tmp/apply-dirty-log-repair-v2.py
+          python3 /tmp/fix-dirty-log-oracle-v2.py
 
       - name: Install build dependencies
         shell: bash
