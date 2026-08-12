@@ -1,0 +1,24 @@
+name: Validate repair v2 live KVM
+on:
+  push:
+    branches:
+      - linux-fieldwork/validate-repair-v2-live-kvm
+jobs:
+  live-kvm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host facts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          getconf PAGESIZE
+          ls -l /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Run live migration tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          scripts/dev_cli.sh tests --integration -- --test-filter test_live_migration_basic
