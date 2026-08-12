@@ -1,0 +1,125 @@
+name: Linux Fieldwork materialize QCOW cache eviction candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-qcow-cache-eviction-r645
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-qcow-cache-eviction-r645.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      OUT_BRANCH: linux-fieldwork/review-qcow-cache-eviction-r645
+      CACHE_TEST: formats::qcow::vec_cache::unit_tests::failed_eviction_keeps_dirty_victim
+      REFCOUNT_TEST: formats::qcow::refcount::eviction_error_candidate_unit_tests::failed_refblock_eviction_keeps_dirty_victim_and_old_pointer
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CH_SHA }}
+          path: cloud-hypervisor
+          persist-credentials: true
+
+      - name: Check out exact Fieldwork materializer
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: research/ch-qcow-cache-eviction-error-r640
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Pin source and toolchain
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test -z "$(git status --short)"
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          rustc --version
+
+      - name: Materialize exact reviewed candidate and durability regression
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ../fieldwork/investigations/cloud-hypervisor-qcow-cache-eviction-error/apply_candidate.py
+          python3 ../fieldwork/investigations/cloud-hypervisor-qcow-cache-eviction-error/apply_candidate_probe.py
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          printf '%s\n' \
+            block/src/formats/qcow/metadata.rs \
+            block/src/formats/qcow/refcount.rs \
+            block/src/formats/qcow/vec_cache.rs > ../expected-files.txt
+          git diff --name-only | sort > ../actual-files.txt
+          diff -u ../expected-files.txt ../actual-files.txt
+          git diff -- block/src/formats/qcow/metadata.rs block/src/formats/qcow/refcount.rs block/src/formats/qcow/vec_cache.rs | tee ../r645-review.diff
+
+      - name: Execute focused and full block gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo test --locked -p block --lib -- --list | tee ../r645-test-list.txt
+          grep -F "$CACHE_TEST: test" ../r645-test-list.txt
+          grep -F "$REFCOUNT_TEST: test" ../r645-test-list.txt
+          cargo test --locked -p block --lib "$CACHE_TEST" -- --exact --nocapture 2>&1 | tee ../r645-cache.log
+          cargo test --locked -p block --lib "$REFCOUNT_TEST" -- --exact --nocapture 2>&1 | tee ../r645-refcount.log
+          cargo test --locked -p block 2>&1 | tee ../r645-block.log
+          cargo test --locked -p block --features io_uring 2>&1 | tee ../r645-io-uring.log
+
+      - name: Quality gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo clippy --locked -p block --features io_uring --all-targets --tests -- -D warnings 2>&1 | tee ../r645-clippy.log
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --name-only | sort > ../actual-files.txt
+          diff -u ../expected-files.txt ../actual-files.txt
+
+      - name: Commit and publish clean review branch
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git switch -c "$OUT_BRANCH"
+          git add block/src/formats/qcow/metadata.rs block/src/formats/qcow/refcount.rs block/src/formats/qcow/vec_cache.rs
+          git commit -s -m "block: Make QCOW cache eviction failure-atomic" -m "Keep dirty eviction victims resident until their write succeeds, and publish replacement refcount/L2 pointers only after fallible cache insertion completes. Add cache and refcount retry regressions." -m "Assisted-by: ChatGPT:GPT-5.6 Sol"
+          test "$(git rev-list --count "$CH_SHA"..HEAD)" = 1
+          git diff --name-only "$CH_SHA"...HEAD | sort > ../committed-files.txt
+          diff -u ../expected-files.txt ../committed-files.txt
+          git push --force-with-lease origin "HEAD:refs/heads/$OUT_BRANCH"
+          git rev-parse HEAD | tee ../r645-review-head.txt
+          git rev-parse HEAD^{tree} | tee ../r645-review-tree.txt
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qcow-cache-eviction-r645-review
+          if-no-files-found: warn
+          path: |
+            r645-review.diff
+            r645-test-list.txt
+            r645-cache.log
+            r645-refcount.log
+            r645-block.log
+            r645-io-uring.log
+            r645-clippy.log
+            r645-review-head.txt
+            r645-review-tree.txt
