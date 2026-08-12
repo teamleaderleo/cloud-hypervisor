@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::mem::offset_of;
 #[cfg(feature = "sev_snp")]
 use std::num;
+use std::num::NonZeroU64;
 #[cfg(feature = "sev_snp")]
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
@@ -1482,12 +1483,30 @@ impl vm::Vm for KvmVm {
     }
 
     ///
-    /// Get dirty pages bitmap (one bit per page)
+    /// Get dirty pages bitmap (one bit per host page)
     ///
-    fn get_dirty_log(&self, slot: u32, _base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
-        self.fd
+    fn get_dirty_log(
+        &self,
+        slot: u32,
+        _base_gpa: u64,
+        memory_size: u64,
+    ) -> vm::Result<crate::DirtyLog> {
+        // SAFETY: Calling sysconf with _SC_PAGESIZE has no memory-safety requirements.
+        let raw_page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let bytes_per_bit = u64::try_from(raw_page_size)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .filter(|page_size| page_size.get().is_power_of_two())
+            .ok_or_else(|| vm::HypervisorVmError::GetDirtyLog(anyhow!("Invalid host page size")))?;
+        let bitmap = self
+            .fd
             .get_dirty_log(slot, memory_size as usize)
-            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
+            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))?;
+
+        Ok(crate::DirtyLog {
+            bitmap,
+            bytes_per_bit,
+        })
     }
 
     ///
