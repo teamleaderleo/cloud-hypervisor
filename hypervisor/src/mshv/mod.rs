@@ -5,6 +5,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 #[cfg(feature = "sev_snp")]
 use std::num::NonZeroUsize;
 #[cfg(feature = "sev_snp")]
@@ -2196,16 +2197,27 @@ impl vm::Vm for MshvVm {
     }
 
     ///
-    /// Get dirty pages bitmap (one bit per page)
+    /// Get dirty pages bitmap (one bit per MSHV page)
     ///
-    fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
-        self.fd
+    fn get_dirty_log(
+        &self,
+        _slot: u32,
+        base_gpa: u64,
+        memory_size: u64,
+    ) -> vm::Result<crate::DirtyLog> {
+        let bitmap = self
+            .fd
             .get_dirty_log(
                 base_gpa >> PAGE_SHIFT,
                 memory_size as usize,
                 MSHV_GPAP_ACCESS_OP_CLEAR as u8,
             )
-            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
+            .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))?;
+
+        Ok(crate::DirtyLog {
+            bitmap,
+            bytes_per_bit: NonZeroU64::new(1u64 << PAGE_SHIFT).unwrap(),
+        })
     }
 
     /// Retrieve guest clock.
