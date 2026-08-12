@@ -1,0 +1,120 @@
+name: Linux Fieldwork materialize TDVF section type candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-tdvf-section-type-r590t
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-tdvf-section-type-r590t.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      OUT_BRANCH: linux-fieldwork/review-tdvf-section-type-r590t
+      FEATURES: arch/tdx,arch/kvm,hypervisor/tdx,hypervisor/kvm
+      INVALID_TEST: x86_64::tdx::unit_tests::tdvf_unknown_section_type_is_rejected
+      CONTROL_TEST: x86_64::tdx::unit_tests::tdvf_known_and_reserved_section_types_are_validated
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CH_SHA }}
+          path: cloud-hypervisor
+          persist-credentials: true
+
+      - name: Check out exact Fieldwork materializer
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: research/ch-tdvf-section-type-r590t
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Pin source and toolchains
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test -z "$(git status --short)"
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustup override set 1.89.0
+          rustc --version
+
+      - name: Materialize validity-safe parser candidate
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ../fieldwork/investigations/cloud-hypervisor-tdvf-section-type/apply_candidate.py
+          cargo +nightly fmt --all
+          cargo +nightly fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/x86_64/tdx/mod.rs"
+          git diff -- arch/src/x86_64/tdx/mod.rs | tee ../r590t-review.diff
+
+      - name: Execute focused and broad TDX gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if test -e /dev/kvm; then sudo chmod a+rw /dev/kvm; fi
+          cargo test --locked -p arch -p hypervisor --features "$FEATURES" --lib -- --list | tee ../r590t-test-list.txt
+          grep -F "$INVALID_TEST: test" ../r590t-test-list.txt
+          grep -F "$CONTROL_TEST: test" ../r590t-test-list.txt
+          cargo test --locked -p arch -p hypervisor --features "$FEATURES" --lib "$INVALID_TEST" -- --exact --nocapture 2>&1 | tee ../r590t-invalid.log
+          cargo test --locked -p arch -p hypervisor --features "$FEATURES" --lib "$CONTROL_TEST" -- --exact --nocapture 2>&1 | tee ../r590t-control.log
+          cargo test --locked -p arch -p hypervisor --features "$FEATURES" --lib 2>&1 | tee ../r590t-broad.log
+
+      - name: Quality gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo clippy --locked -p arch -p hypervisor --features "$FEATURES" --all-targets -- \
+            -D warnings -A unreachable-code -A unused-mut -A unused-variables \
+            2>&1 | tee ../r590t-clippy.log
+          cargo +nightly fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/x86_64/tdx/mod.rs"
+
+      - name: Commit and publish clean review branch
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git switch -c "$OUT_BRANCH"
+          git add arch/src/x86_64/tdx/mod.rs
+          git commit -s -m "arch: Validate TDVF section type before enum conversion" -m "Read untrusted TDVF section records into an integer-only wire representation and construct TdvfSectionType only after checked conversion, rejecting unsupported numeric values. Add unknown-type and represented-type regressions." -m "Assisted-by: ChatGPT:GPT-5.6 Sol"
+          test "$(git rev-list --count "$CH_SHA"..HEAD)" = 1
+          test "$(git diff --name-only "$CH_SHA"...HEAD)" = "arch/src/x86_64/tdx/mod.rs"
+          git push --force-with-lease origin "HEAD:refs/heads/$OUT_BRANCH"
+          git rev-parse HEAD | tee ../r590t-review-head.txt
+          git rev-parse HEAD^{tree} | tee ../r590t-review-tree.txt
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdvf-section-type-r590t-review
+          if-no-files-found: warn
+          path: |
+            r590t-review.diff
+            r590t-test-list.txt
+            r590t-invalid.log
+            r590t-control.log
+            r590t-broad.log
+            r590t-clippy.log
+            r590t-review-head.txt
+            r590t-review-tree.txt
