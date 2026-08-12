@@ -565,10 +565,20 @@ impl MemoryRangeTable {
     }
 
     pub fn read_from(fd: &mut dyn Read, length: u64) -> Result<MemoryRangeTable, MigratableError> {
-        assert!((length as usize).is_multiple_of(size_of::<MemoryRange>()));
+        let length = usize::try_from(length).map_err(|_| {
+            MigratableError::MigrateReceive(anyhow!(
+                "invalid memory range table length: {length} does not fit in usize"
+            ))
+        })?;
+        if !length.is_multiple_of(size_of::<MemoryRange>()) {
+            return Err(MigratableError::MigrateReceive(anyhow!(
+                "invalid memory range table length: {length} is not a multiple of {}",
+                size_of::<MemoryRange>()
+            )));
+        }
 
         let mut data: Vec<MemoryRange> =
-            vec![MemoryRange::default(); length as usize / size_of::<MemoryRange>()];
+            vec![MemoryRange::default(); length / size_of::<MemoryRange>()];
 
         fd.read_exact(data.as_mut_bytes())
             .map_err(MigratableError::MigrateSocket)?;
@@ -682,6 +692,13 @@ mod unit_tests {
         // producing an out-of-range enum discriminant.
         let mut cursor = Cursor::new(99u16.to_le_bytes().to_vec());
         ConnectionRole::read_from(&mut cursor).unwrap_err();
+    }
+
+    #[test]
+    fn test_memory_range_table_rejects_unaligned_length() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let err = MemoryRangeTable::read_from(&mut cursor, 1).unwrap_err();
+        assert!(matches!(err, crate::MigratableError::MigrateReceive(_)));
     }
 
     #[test]
