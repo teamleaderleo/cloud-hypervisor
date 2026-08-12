@@ -33,6 +33,20 @@ replace_once(
 
 replace_once(
     "vmm/src/memory_manager.rs",
+    """        return Err(anyhow!(
+            "Dirty bitmap granularity mismatch: VM={} VMM={}",
+            bytes_per_bit,
+            vmm_bytes_per_bit
+        ));
+""",
+    """        return Err(anyhow!(
+            "Dirty bitmap granularity mismatch: VM={bytes_per_bit} VMM={vmm_bytes_per_bit}"
+        ));
+""",
+)
+
+replace_once(
+    "vmm/src/memory_manager.rs",
     "    use hypervisor::DirtyLog;\n\n    use super::dirty_bitmap_to_range_table;\n",
     "    use hypervisor::DirtyLog;\n    use vm_migration::protocol::MemoryRange;\n\n    use super::dirty_bitmap_to_range_table;\n",
 )
