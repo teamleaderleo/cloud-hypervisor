@@ -1,0 +1,242 @@
+name: Fieldwork KVM dirty-log granule arm64 validation
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/validate-kvm-dirty-log-granule
+
+permissions:
+  contents: read
+
+jobs:
+  validate-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout exact canonical source
+        uses: actions/checkout@v7
+        with:
+          repository: cloud-hypervisor/cloud-hypervisor
+          ref: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply minimal candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "hypervisor/src/vm.rs",
+              '''    /// Stop logging dirty pages
+              fn stop_dirty_log(&self) -> Result<()>;
+              /// Get dirty pages bitmap
+              fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
+          ''',
+              '''    /// Stop logging dirty pages
+              fn stop_dirty_log(&self) -> Result<()>;
+              /// Return the page size represented by each dirty-log bitmap bit.
+              fn dirty_log_page_size(&self) -> u64;
+              /// Get dirty pages bitmap
+              fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
+          ''',
+          )
+
+          replace_once(
+              "hypervisor/src/kvm/mod.rs",
+              '''    ///
+              /// Get dirty pages bitmap (one bit per page)
+              ///
+              fn get_dirty_log(&self, slot: u32, _base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
+          ''',
+              '''    ///
+              /// Return the KVM dirty-log page size.
+              ///
+              fn dirty_log_page_size(&self) -> u64 {
+                  // SAFETY: FFI call. Trivially safe.
+                  unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
+              }
+
+              ///
+              /// Get dirty pages bitmap (one bit per page)
+              ///
+              fn get_dirty_log(&self, slot: u32, _base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
+          ''',
+          )
+
+          replace_once(
+              "hypervisor/src/mshv/mod.rs",
+              '''    ///
+              /// Get dirty pages bitmap (one bit per page)
+              ///
+              fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
+          ''',
+              '''    ///
+              /// Return the MSHV dirty-log page size.
+              ///
+              fn dirty_log_page_size(&self) -> u64 {
+                  1u64 << PAGE_SHIFT
+              }
+
+              ///
+              /// Get dirty pages bitmap (one bit per page)
+              ///
+              fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
+          ''',
+          )
+
+          replace_once(
+              "vmm/src/memory_manager.rs",
+              '''impl Migratable for MemoryManager {
+              // Start the dirty log in the hypervisor (kvm/mshv).
+          ''',
+              '''fn dirty_bitmap_to_range_table(
+              vm_dirty_bitmap: &[u64],
+              vmm_dirty_bitmap: &[u64],
+              start_addr: u64,
+              page_size: u64,
+          ) -> MemoryRangeTable {
+              let dirty_bitmap = vm_dirty_bitmap
+                  .iter()
+                  .zip(vmm_dirty_bitmap.iter())
+                  .map(|(x, y)| x | y);
+
+              MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, start_addr, page_size)
+          }
+
+          impl Migratable for MemoryManager {
+              // Start the dirty log in the hypervisor (kvm/mshv).
+          ''',
+          )
+
+          replace_once(
+              "vmm/src/memory_manager.rs",
+              '''    fn dirty_log(&mut self) -> result::Result<MemoryRangeTable, MigratableError> {
+                  let mut table = MemoryRangeTable::default();
+                  for r in &self.guest_ram_mappings {
+          ''',
+              '''    fn dirty_log(&mut self) -> result::Result<MemoryRangeTable, MigratableError> {
+                  let mut table = MemoryRangeTable::default();
+                  let dirty_log_page_size = self.vm.dirty_log_page_size();
+                  for r in &self.guest_ram_mappings {
+          ''',
+          )
+
+          replace_once(
+              "vmm/src/memory_manager.rs",
+              '''            let dirty_bitmap = vm_dirty_bitmap
+                      .iter()
+                      .zip(vmm_dirty_bitmap.iter())
+                      .map(|(x, y)| x | y);
+
+                  let sub_table = MemoryRangeTable::from_dirty_bitmap(dirty_bitmap, r.gpa, 4096);
+          ''',
+              '''            let sub_table = dirty_bitmap_to_range_table(
+                      &vm_dirty_bitmap,
+                      &vmm_dirty_bitmap,
+                      r.gpa,
+                      dirty_log_page_size,
+                  );
+          ''',
+          )
+
+          memory_manager = Path("vmm/src/memory_manager.rs")
+          memory_manager.write_text(
+              memory_manager.read_text()
+              + '''
+
+          #[cfg(test)]
+          mod tests {
+              use super::dirty_bitmap_to_range_table;
+
+              const BASE_GPA: u64 = 0x4000_0000;
+
+              #[test]
+              fn test_dirty_bitmap_page_granules() {
+                  for (page_size, expected_gpa) in [
+                      (0x1000, 0x4000_1000),
+                      (0x4000, 0x4000_4000),
+                      (0x1_0000, 0x4001_0000),
+                  ] {
+                      let table =
+                          dirty_bitmap_to_range_table(&[0b10], &[0], BASE_GPA, page_size);
+                      assert_eq!(table.regions().len(), 1);
+                      assert_eq!(table.regions()[0].gpa, expected_gpa);
+                      assert_eq!(table.regions()[0].length, page_size);
+                  }
+              }
+
+              #[test]
+              fn test_dirty_bitmap_combines_sources_and_coalesces() {
+                  let table =
+                      dirty_bitmap_to_range_table(&[0b0010], &[0b0100], BASE_GPA, 0x4000);
+                  assert_eq!(table.regions().len(), 1);
+                  assert_eq!(table.regions()[0].gpa, 0x4000_4000);
+                  assert_eq!(table.regions()[0].length, 0x8000);
+              }
+
+              #[test]
+              fn test_dirty_bitmap_coalesces_across_words() {
+                  let table = dirty_bitmap_to_range_table(
+                      &[1u64 << 63, 0],
+                      &[0, 1],
+                      BASE_GPA,
+                      0x1_0000,
+                  );
+                  assert_eq!(table.regions().len(), 1);
+                  assert_eq!(table.regions()[0].gpa, 0x403f_0000);
+                  assert_eq!(table.regions()[0].length, 0x2_0000);
+              }
+          }
+          '''
+          )
+          PY
+
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Format and fence candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +nightly fmt --all
+          git diff --check
+          expected=$(printf '%s\n' \
+            hypervisor/src/kvm/mod.rs \
+            hypervisor/src/mshv/mod.rs \
+            hypervisor/src/vm.rs \
+            vmm/src/memory_manager.rs)
+          actual=$(git diff --name-only)
+          test "$actual" = "$expected"
+
+      - name: Show host granule
+        run: getconf PAGESIZE
+
+      - name: Run dirty bitmap synthetic tests
+        run: cargo test -p vmm --features kvm dirty_bitmap_ -- --nocapture
+
+      - name: Run existing migration bitmap control
+        run: cargo test -p vm-migration test_memory_range_table_from_dirty_ranges_iter -- --nocapture
+
+      - name: Build KVM VMM on arm64
+        run: cargo check -p vmm --features kvm
+
+      - name: Clippy KVM VMM on arm64
+        run: cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
+
+      - name: Inspect full diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --stat
+          git diff --check
+          git diff
