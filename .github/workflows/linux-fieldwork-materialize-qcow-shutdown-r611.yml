@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 50
     env:
       CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      FIELDWORK_PROBE_REV: a9db2a0274a1547f75fa704065b6449aebc38c31
       OUT_BRANCH: linux-fieldwork/review-qcow-shutdown-dirty-r611
       TEST_FAIL: formats::qcow::metadata::unit_tests::failed_metadata_sync_keeps_dirty_bit_set
       TEST_CLEAN: formats::qcow::metadata::unit_tests::successful_metadata_sync_clears_dirty_bit
@@ -44,6 +45,7 @@ jobs:
           set -euxo pipefail
           test "$(git rev-parse HEAD)" = "$CH_SHA"
           test -z "$(git status --short)"
+          test "$(git -C ../fieldwork rev-parse HEAD)" = "$FIELDWORK_PROBE_REV"
           rustup toolchain install 1.89.0 --profile minimal
           rustup component add --toolchain 1.89.0 rustfmt clippy
           rustup override set 1.89.0
