@@ -18,10 +18,23 @@ jobs:
       - name: Map current integration helpers
         run: |
           set -eufo pipefail
-          file=cloud-hypervisor/tests/integration.rs
+          integration=cloud-hypervisor/tests/integration.rs
+          wrappers=cloud-hypervisor/tests/common/tests_wrappers.rs
+          infra=test_infra/src/lib.rs
+          vm_config=vmm/src/vm_config.rs
+
           echo '=== snapshot / restore symbols ==='
-          grep -nE 'fn .*snapshot|test_.*snapshot|snapshot_restore|restore_uffd|memory_restore_mode|--landlock|landlock' "$file" | head -n 240 || true
-          echo '=== ch-remote snapshot / restore invocations ==='
-          grep -nE 'ch-remote|snapshot|restore' "$file" | grep -E 'snapshot|restore' | head -n 240 || true
+          grep -nE 'fn .*snapshot|test_.*snapshot|snapshot_restore|restore_uffd|memory_restore_mode|--landlock|landlock' "$integration" | head -n 240 || true
+
+          echo '=== UbuntuDiskConfig / disk paths ==='
+          grep -n -A45 -B8 'struct UbuntuDiskConfig\|impl UbuntuDiskConfig' "$infra" | head -n 220 || true
+          grep -n -A30 -B8 'fn disk(&self\|DiskType::OperatingSystem' "$infra" | head -n 220 || true
+
+          echo '=== QCOW / backing integration usage ==='
+          grep -nE 'qemu-img|backing_files|image_type=qcow' "$integration" "$wrappers" | head -n 240 || true
+
+          echo '=== Landlock automatic rule helpers ==='
+          grep -nE 'apply_landlock|parent\(\)|LandlockConfig' "$vm_config" | head -n 260 || true
+
           echo '=== workflow runner inventory ==='
           grep -R -nE 'runs-on:|integration' .github/workflows | head -n 240 || true
