@@ -1,0 +1,125 @@
+name: Linux Fieldwork materialize QCOW shutdown candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-qcow-shutdown-dirty-r611
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-qcow-shutdown-r611.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      OUT_BRANCH: linux-fieldwork/review-qcow-shutdown-dirty-r611
+      TEST_FAIL: formats::qcow::metadata::unit_tests::failed_metadata_sync_keeps_dirty_bit_set
+      TEST_CLEAN: formats::qcow::metadata::unit_tests::successful_metadata_sync_clears_dirty_bit
+    steps:
+      - name: Check out Fieldwork materializers
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: research/ch-qcow-shutdown-dirty
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/cloud-hypervisor
+          ref: ${{ env.CH_SHA }}
+          path: cloud-hypervisor
+          persist-credentials: true
+
+      - name: Pin source and Rust
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test -z "$(git status --short)"
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          rustc --version
+
+      - name: Apply verified candidate and durable regressions
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ../fieldwork/investigations/cloud-hypervisor-qcow-shutdown-dirty/apply_candidate.py
+          python3 ../fieldwork/investigations/cloud-hypervisor-qcow-shutdown-dirty/apply_probe.py
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "block/src/formats/qcow/metadata.rs"
+          git diff -- block/src/formats/qcow/metadata.rs | tee ../r611-review.diff
+
+      - name: Discover and execute focused regressions
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo test --locked -p block --lib -- --list | tee ../r611-test-list.txt
+          grep -F "$TEST_FAIL: test" ../r611-test-list.txt
+          grep -F "$TEST_CLEAN: test" ../r611-test-list.txt
+          cargo test --locked -p block --lib "$TEST_FAIL" -- --exact --nocapture 2>&1 | tee ../r611-failed-sync.log
+          cargo test --locked -p block --lib "$TEST_CLEAN" -- --exact --nocapture 2>&1 | tee ../r611-clean-close.log
+
+      - name: Run default and io_uring block suites
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo test --locked -p block 2>&1 | tee ../r611-block-default.log
+          cargo test --locked -p block --features io_uring 2>&1 | tee ../r611-block-io-uring.log
+
+      - name: Run quality gates
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo clippy --locked -p block --features io_uring --all-targets --tests -- -D warnings 2>&1 | tee ../r611-clippy.log
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "block/src/formats/qcow/metadata.rs"
+
+      - name: Commit and publish clean internal review branch
+        working-directory: cloud-hypervisor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git switch -c "$OUT_BRANCH"
+          git add block/src/formats/qcow/metadata.rs
+          git commit -s -m "block: Keep QCOW dirty after failed shutdown sync" -m "Only clear the QCOW dirty bit after metadata synchronization succeeds. Add regressions for the failed-sync recovery path and ordinary clean close." -m "Assisted-by: ChatGPT:GPT-5.6 Sol"
+          test "$(git rev-list --count "$CH_SHA"..HEAD)" = 1
+          test "$(git diff --name-only "$CH_SHA"...HEAD)" = "block/src/formats/qcow/metadata.rs"
+          git push --force-with-lease origin "HEAD:refs/heads/$OUT_BRANCH"
+          git rev-parse HEAD | tee ../r611-review-head.txt
+          git rev-parse HEAD^{tree} | tee ../r611-review-tree.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qcow-shutdown-r611-review
+          if-no-files-found: warn
+          path: |
+            r611-review.diff
+            r611-test-list.txt
+            r611-failed-sync.log
+            r611-clean-close.log
+            r611-block-default.log
+            r611-block-io-uring.log
+            r611-clippy.log
+            r611-review-head.txt
+            r611-review-tree.txt
