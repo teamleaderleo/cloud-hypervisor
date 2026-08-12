@@ -17,19 +17,68 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Apply frozen patch to exact base and push candidate
+      - name: Apply exact source substitutions and push candidate
         env:
           BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
           CANDIDATE_BRANCH: linux-fieldwork/landlock-restore-order-v1
         run: |
           set -eufo pipefail
-          patch_file="$(mktemp)"
-          cp fieldwork/landlock-restore-order-v1.patch "$patch_file"
-
           git checkout --detach "$BASE_SHA"
-          git apply --check "$patch_file"
-          git apply "$patch_file"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file_path = Path(path)
+              text = file_path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{path}: expected exactly one source block, found {count}"
+                  )
+              file_path.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "vmm/src/vm.rs",
+              """            };
+
+          Vm::new_from_memory_manager(
+          """,
+              """            };
+
+          if snapshot.is_some() && vm_config.lock().unwrap().landlock_enable {
+              vm_config
+                  .lock()
+                  .unwrap()
+                  .apply_landlock()
+                  .map_err(Error::ApplyLandlock)?;
+          }
+
+          Vm::new_from_memory_manager(
+          """,
+          )
+
+          replace_once(
+              "vmm/src/lib.rs",
+              """                if self
+                      .vm_config
+                      .as_ref()
+                      .unwrap()
+                      .lock()
+                      .unwrap()
+                      .landlock_enable
+                  {
+                      let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+                      apply_landlock(&mut config).map_err(VmError::ApplyLandlock)?;
+                  }
+
+          """,
+              "",
+          )
+          PY
+
           git diff --check
+          git diff -- vmm/src/vm.rs vmm/src/lib.rs
 
           git config user.name 'Leo'
           git config user.email 'cheerleaderleo@outlook.com'
