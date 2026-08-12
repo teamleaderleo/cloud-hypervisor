@@ -1,0 +1,44 @@
+name: Fieldwork Landlock restore-order materializer
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/landlock-restore-order-materializer
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout materializer branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Apply frozen patch to exact base and push candidate
+        env:
+          BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          CANDIDATE_BRANCH: linux-fieldwork/landlock-restore-order-v1
+        run: |
+          set -eufo pipefail
+          patch_file="$(mktemp)"
+          cp fieldwork/landlock-restore-order-v1.patch "$patch_file"
+
+          git checkout --detach "$BASE_SHA"
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+          git diff --check
+
+          git config user.name 'Leo'
+          git config user.email 'cheerleaderleo@outlook.com'
+          git add vmm/src/vm.rs vmm/src/lib.rs
+          git diff --cached --stat
+          git commit -m 'vmm: apply Landlock before restoring devices' \
+            -m 'Snapshot memory must be available while the memory manager is restored, but device reconstruction should not open configured or transitive paths before the VM Landlock policy is active.' \
+            -m 'Apply the existing VM configuration rules after snapshot memory restoration and before CPU/device reconstruction. Remove the old post-construction restore restriction so the ruleset is applied once at the effective ownership boundary.' \
+            -m 'Assisted-by: ChatGPT:GPT-5.6 Sol' \
+            -m 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
+
+          git push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
