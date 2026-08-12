@@ -2198,6 +2198,13 @@ impl vm::Vm for MshvVm {
     ///
     /// Get dirty pages bitmap (one bit per page)
     ///
+    fn dirty_log_page_size(&self) -> u64 {
+        1u64 << PAGE_SHIFT
+    }
+
+    ///
+    /// Get dirty pages bitmap (one bit per page)
+    ///
     fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {
         self.fd
             .get_dirty_log(
