@@ -38,6 +38,9 @@ pub enum Error {
     /// SMBIOS string index overflow (u8 limit reached).
     #[error("SMBIOS string index overflow (u8 limit reached: {})", u8::MAX)]
     TooManyStrings,
+    /// SMBIOS Type 11 OEM string count overflow (u8 limit reached).
+    #[error("SMBIOS OEM string count exceeds {}", u8::MAX)]
+    TooManyOemStrings,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -402,12 +405,13 @@ pub fn setup_smbios(mem: &GuestMemoryMmap, smbios: Option<&SmbiosConfig>) -> Res
 
     if !oem_strings.is_empty() {
         handle += 1;
+        let count = u8::try_from(oem_strings.len()).map_err(|_| Error::TooManyOemStrings)?;
 
         let smbios_oemstrings = SmbiosOemStrings {
             r#type: OEM_STRINGS,
             length: size_of::<SmbiosOemStrings>() as u8,
             handle,
-            count: oem_strings.len() as u8,
+            count,
         };
 
         curptr = write_and_incr(mem, smbios_oemstrings, curptr)?;
@@ -649,6 +653,49 @@ mod unit_tests {
         }
         let err = alloc_index(&mut next, true).unwrap_err();
         assert!(matches!(err, Error::TooManyStrings));
+    }
+
+    fn oem_record(mem: &GuestMemoryMmap) -> SmbiosOemStrings {
+        let smbios_ep: Smbios30Entrypoint = mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
+        let mut cur = GuestAddress(smbios_ep.physptr);
+
+        let bios: SmbiosBiosInfo = mem.read_obj(cur).unwrap();
+        cur = cur.checked_add(bios.length as u64).unwrap();
+        let (_, next) = read_string_set(mem, cur);
+        cur = next;
+
+        let sys: SmbiosSysInfo = mem.read_obj(cur).unwrap();
+        cur = cur.checked_add(sys.length as u64).unwrap();
+        let (_, next) = read_string_set(mem, cur);
+        cur = next;
+
+        mem.read_obj(cur).unwrap()
+    }
+
+    #[test]
+    fn smbios_oem_string_count_255_is_accepted() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 4096)]).unwrap();
+        let smbios = SmbiosConfig {
+            oem_strings: (0..255).map(|_| "x".to_string()).collect(),
+            ..Default::default()
+        };
+
+        setup_smbios(&mem, Some(&smbios)).unwrap();
+        let oem = oem_record(&mem);
+        assert_eq!(oem.r#type, OEM_STRINGS);
+        assert_eq!(oem.count, 255);
+    }
+
+    #[test]
+    fn smbios_oem_string_count_256_is_rejected() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 4096)]).unwrap();
+        let smbios = SmbiosConfig {
+            oem_strings: (0..256).map(|_| "x".to_string()).collect(),
+            ..Default::default()
+        };
+
+        let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();
+        assert!(matches!(err, Error::TooManyOemStrings));
     }
 
     #[test]
