@@ -1,0 +1,27 @@
+name: Fieldwork snapshot harness scout
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/snapshot-harness-scout
+
+permissions:
+  contents: read
+
+jobs:
+  map-harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v7
+      - name: Map current integration helpers
+        run: |
+          set -eufo pipefail
+          file=cloud-hypervisor/tests/integration.rs
+          echo '=== snapshot / restore symbols ==='
+          grep -nE 'fn .*snapshot|test_.*snapshot|snapshot_restore|restore_uffd|memory_restore_mode|--landlock|landlock' "$file" | head -n 240 || true
+          echo '=== ch-remote snapshot / restore invocations ==='
+          grep -nE 'ch-remote|snapshot|restore' "$file" | grep -E 'snapshot|restore' | head -n 240 || true
+          echo '=== workflow runner inventory ==='
+          grep -R -nE 'runs-on:|integration' .github/workflows | head -n 240 || true
