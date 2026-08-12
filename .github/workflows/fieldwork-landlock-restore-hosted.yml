@@ -1,0 +1,45 @@
+name: Fieldwork Landlock restore hosted runtime
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/landlock-restore-candidate-hosted
+      - linux-fieldwork/landlock-restore-baseline-hosted
+
+permissions:
+  contents: read
+
+jobs:
+  focused-landlock-restore:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact runtime head
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify nested KVM capability
+        run: |
+          set -eufo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo 'HOSTED_CAPABILITY_MISSING: /dev/kvm is absent'
+            exit 42
+          fi
+          ls -l /dev/kvm
+          sudo chmod a+rw /dev/kvm
+      - name: Install Docker
+        run: |
+          set -eufo pipefail
+          sudo apt-get update
+          sudo apt-get -y install ca-certificates curl gnupg
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce docker-ce-cli
+      - name: Execute focused integration discriminator
+        timeout-minutes: 35
+        run: |
+          set -eufo pipefail
+          scripts/dev_cli.sh tests --integration --libc gnu -- \
+            --test-filter test_snapshot_restore_landlock_qcow_backing
