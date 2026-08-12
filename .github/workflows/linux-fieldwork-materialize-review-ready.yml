@@ -1,0 +1,137 @@
+name: Linux Fieldwork materialize review-ready candidates
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-review-ready-1af93ac
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-review-ready.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  smbios-oem-count-r593:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      TARGET_BRANCH: linux-fieldwork/review-smbios-oem-count-r593
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/cloud-hypervisor
+          ref: ${{ env.CH_SHA }}
+          path: source
+          fetch-depth: 1
+
+      - name: Check out executed Fieldwork materializer
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: research/ch-smbios-oem-count-review-r593r
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Apply exact reviewed candidate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          test "$(git hash-object arch/src/x86_64/smbios.rs)" = "2878ac3f5ff8f3eee65af5a046a269112c06b943"
+          python3 ../fieldwork/investigations/cloud-hypervisor-smbios-oem-count/apply_review_candidate.py
+          test "$(git diff --name-only)" = "arch/src/x86_64/smbios.rs"
+          git diff --check
+
+      - name: Validate exact reviewed candidate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --locked -p arch --features kvm --lib x86_64::smbios::unit_tests::smbios_oem_string_count_255_is_accepted -- --exact
+          cargo test --locked -p arch --features kvm --lib x86_64::smbios::unit_tests::smbios_oem_string_count_256_is_rejected -- --exact
+          cargo test --locked -p arch --features kvm --lib
+          cargo clippy --locked -p arch --features kvm --all-targets -- -D warnings
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/x86_64/smbios.rs"
+
+      - name: Commit and publish clean review branch
+        working-directory: source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git add arch/src/x86_64/smbios.rs
+          git commit -s -m "arch: Reject oversized SMBIOS Type 11 OEM string sets" \
+            -m "Keep 255 OEM strings representable and reject larger sets before the one-byte Type 11 count can wrap."
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+
+  migration-memory-table-r604:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CH_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      TARGET_BRANCH: linux-fieldwork/review-migration-memory-table-r604
+    steps:
+      - name: Check out exact Cloud Hypervisor source
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/cloud-hypervisor
+          ref: ${{ env.CH_SHA }}
+          path: source
+          fetch-depth: 1
+
+      - name: Check out executed Fieldwork materializer
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: research/ch-migration-memory-table-length-r604
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Apply exact reviewed candidate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$CH_SHA"
+          python3 ../fieldwork/investigations/cloud-hypervisor-migration-memory-table-length/apply_review_candidate.py
+          test "$(git diff --name-only)" = "vm-migration/src/protocol.rs"
+          git diff --check
+
+      - name: Validate exact reviewed candidate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --locked -p vm-migration protocol::unit_tests::test_memory_range_table_rejects_unaligned_length -- --exact
+          cargo test --locked -p vm-migration
+          cargo clippy --locked -p vm-migration --all-targets -- -D warnings
+          git diff --check
+          test "$(git diff --name-only)" = "vm-migration/src/protocol.rs"
+
+      - name: Commit and publish clean review branch
+        working-directory: source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git add vm-migration/src/protocol.rs
+          git commit -s -m "migration: Reject malformed memory range table lengths" \
+            -m "Return a migration receive error for unaligned table framing instead of panicking on peer-provided length."
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
