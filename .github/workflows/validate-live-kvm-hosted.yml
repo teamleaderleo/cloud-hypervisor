@@ -1,0 +1,25 @@
+name: Validate live KVM candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/validate-live-kvm-hosted
+
+jobs:
+  live-kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host facts
+        run: |
+          set -euxo pipefail
+          uname -a
+          getconf PAGESIZE
+          ls -l /dev/kvm || true
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Run one live migration integration test
+        run: |
+          set -euxo pipefail
+          scripts/dev_cli.sh tests --integration -- --test-filter test_live_migration_basic
