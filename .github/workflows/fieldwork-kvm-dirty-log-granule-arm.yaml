@@ -6,7 +6,7 @@ on:
       - linux-fieldwork/validate-kvm-dirty-log-granule
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate-arm64:
@@ -42,7 +42,10 @@ jobs:
           replace_once(
               "hypervisor/src/vm.rs",
               "Vm trait",
-              "    fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;",
+              lines(
+                  "    /// Get dirty pages bitmap",
+                  "    fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;",
+              ),
               lines(
                   "    /// Return the page size represented by each dirty-log bitmap bit.",
                   "    fn dirty_log_page_size(&self) -> u64;",
@@ -53,8 +56,14 @@ jobs:
           replace_once(
               "hypervisor/src/kvm/mod.rs",
               "KVM backend",
-              "    fn get_dirty_log(&self, slot: u32, _base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {",
               lines(
+                  "    ///",
+                  "    /// Get dirty pages bitmap (one bit per page)",
+                  "    ///",
+                  "    fn get_dirty_log(&self, slot: u32, _base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {",
+              ),
+              lines(
+                  "    /// Return the page size represented by each KVM dirty-log bitmap bit.",
                   "    fn dirty_log_page_size(&self) -> u64 {",
                   "        // SAFETY: FFI call. Trivially safe.",
                   "        unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }",
@@ -69,8 +78,14 @@ jobs:
           replace_once(
               "hypervisor/src/mshv/mod.rs",
               "MSHV backend",
-              "    fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {",
               lines(
+                  "    ///",
+                  "    /// Get dirty pages bitmap (one bit per page)",
+                  "    ///",
+                  "    fn get_dirty_log(&self, _slot: u32, base_gpa: u64, memory_size: u64) -> vm::Result<Vec<u64>> {",
+              ),
+              lines(
+                  "    /// Return the page size represented by each MSHV dirty-log bitmap bit.",
                   "    fn dirty_log_page_size(&self) -> u64 {",
                   "        1u64 << PAGE_SHIFT",
                   "    }",
@@ -188,8 +203,11 @@ jobs:
           p.write_text(p.read_text() + tests)
           PY
 
-      - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - name: Install formatting and cross target
+        shell: bash
+        run: |
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustup target add x86_64-unknown-linux-gnu
 
       - name: Format and fence candidate
         shell: bash
@@ -203,6 +221,7 @@ jobs:
             hypervisor/src/vm.rs \
             vmm/src/memory_manager.rs)
           actual=$(git diff --name-only)
+          printf '%s\n' "$actual"
           test "$actual" = "$expected"
 
       - name: Show host granule
@@ -217,8 +236,14 @@ jobs:
       - name: Build KVM VMM on arm64
         run: cargo check -p vmm --features kvm
 
+      - name: Cross-check MSHV VMM on x86_64
+        run: cargo check -p vmm --features mshv --target x86_64-unknown-linux-gnu
+
       - name: Clippy KVM VMM on arm64
         run: cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
+
+      - name: Clippy MSHV VMM for x86_64
+        run: cargo clippy -p vmm --features mshv --target x86_64-unknown-linux-gnu --all-targets --tests -- -D warnings
 
       - name: Inspect full diff
         shell: bash
@@ -227,3 +252,22 @@ jobs:
           git diff --stat
           git diff --check
           git diff
+
+      - name: Commit and push source-only candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add hypervisor/src/kvm/mod.rs hypervisor/src/mshv/mod.rs hypervisor/src/vm.rs vmm/src/memory_manager.rs
+          git commit \
+            -m 'vmm: Use backend dirty log page size' \
+            -m 'KVM dirty bitmap bits follow the host base page size. Carry that page size from the hypervisor backend into migration range conversion so 16K and 64K KVM hosts address the correct guest pages.' \
+            -m 'Keep MSHV fixed at its existing 4K dirty-log unit and cover 4K, 16K, 64K, source merging, and adjacent-bit coalescing with synthetic unit tests.' \
+            -m 'Assisted-by: ChatGPT:GPT-5.6 Sol'
+          test "$(git rev-list --count 1af93ac7035cda77cd87b0c18b1134ebb0928052..HEAD)" = 1
+          git show --stat --oneline --decorate HEAD
+          git remote add fieldwork "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push fieldwork HEAD:refs/heads/linux-fieldwork/kvm-dirty-log-granule-candidate
