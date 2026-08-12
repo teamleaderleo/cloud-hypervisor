@@ -1,0 +1,28 @@
+name: Probe ARM non-4K KVM
+on:
+  push:
+    branches:
+      - linux-fieldwork/probe-arm-non4k-kvm
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host facts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          getconf PAGESIZE
+          getconf PAGE_SIZE || true
+          cat /proc/cpuinfo | head -80
+          ls -l /dev/kvm || true
+          test -e /dev/kvm && sudo chmod 666 /dev/kvm || true
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo KVM_USABLE=yes
+          else
+            echo KVM_USABLE=no
+          fi
+          grep -E 'CONFIG_ARM64_(4K|16K|64K)_PAGES' /boot/config-$(uname -r) || true
+          apt-cache search '^linux-image.*64k.*arm64$' | head -20 || true
+          apt-cache search '^linux-image.*16k.*arm64$' | head -20 || true
