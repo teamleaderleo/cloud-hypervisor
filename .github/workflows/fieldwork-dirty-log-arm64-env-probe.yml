@@ -1,0 +1,47 @@
+name: Fieldwork ARM64 dirty-log environment probe
+
+on:
+  push:
+    branches:
+      - fieldwork/dirty-log-arm64-env-probe
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Record exact execution environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          uname -m
+          cat /etc/os-release
+          getconf PAGESIZE
+          getconf LONG_BIT
+          id
+          printf '%s\n' '--- /dev/kvm ---'
+          ls -l /dev/kvm || true
+          stat /dev/kvm || true
+          printf '%s\n' '--- KVM modules ---'
+          lsmod | grep '^kvm' || true
+          printf '%s\n' '--- CPU ---'
+          grep -m1 -E '^(Features|flags)' /proc/cpuinfo || true
+          printf '%s\n' '--- page config ---'
+          grep -E 'CONFIG_ARM64_(4K|16K|64K)_PAGES|CONFIG_PAGE_SIZE' /boot/config-"$(uname -r)" 2>/dev/null || true
+          printf '%s\n' '--- KVM accessibility ---'
+          python3 - <<'PY'
+          import os
+          path = '/dev/kvm'
+          print('exists=', os.path.exists(path))
+          if os.path.exists(path):
+              try:
+                  fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+              except OSError as e:
+                  print('open_error=', repr(e))
+              else:
+                  print('open_ok_fd=', fd)
+                  os.close(fd)
+          PY
