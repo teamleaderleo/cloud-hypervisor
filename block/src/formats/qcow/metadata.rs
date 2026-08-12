@@ -658,10 +658,10 @@ impl QcowState {
         let mut new_cluster: Option<u64> = None;
         if !self.l2_cache.contains_key(l1_index) {
             let l2_table = if l2_addr_disk == 0 {
-                // Allocate a new cluster to store the L2 table
+                // Allocate a new cluster to store the L2 table. Publication
+                // through L1 happens only after cache insertion succeeds.
                 let new_addr = self.get_new_cluster(None)?;
                 new_cluster = Some(new_addr);
-                self.l1_table[l1_index] = new_addr;
                 VecCache::new(self.l2_entries as usize)
             } else {
                 self.reject_invalid_cluster_offset(l2_addr_disk)?;
@@ -672,6 +672,9 @@ impl QcowState {
             self.l2_cache.insert(l1_index, l2_table, |index, evicted| {
                 raw_file.write_pointer_table_direct(l1_table[index], evicted.iter())
             })?;
+            if let Some(new_addr) = new_cluster {
+                self.l1_table[l1_index] = new_addr;
+            }
         }
         Ok(new_cluster)
     }
