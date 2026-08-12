@@ -24,14 +24,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch disposable transformer
+      - name: Fetch exact disposable transformer
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git remote add fieldwork-read "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 fieldwork-read fieldwork/kvm-dirty-log-granule-repair-v2
+          git fetch --depth=1 fieldwork-read "$GITHUB_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
           git show FETCH_HEAD:.github/fieldwork/apply-dirty-log-repair-v2.py > /tmp/apply-dirty-log-repair-v2.py
           git show FETCH_HEAD:.github/fieldwork/fix-dirty-log-oracle-v2.py > /tmp/fix-dirty-log-oracle-v2.py
           git show FETCH_HEAD:.github/fieldwork/fix-dirty-log-clippy-v2.py > /tmp/fix-dirty-log-clippy-v2.py
