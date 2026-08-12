@@ -13,6 +13,7 @@
 use std::any::Any;
 #[cfg(any(feature = "sev_snp", feature = "tdx"))]
 use std::io;
+use std::num::NonZeroU64;
 use std::result;
 use std::sync::Arc;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -296,6 +297,13 @@ pub enum HypervisorVmError {
 ///
 pub type Result<T> = result::Result<T, HypervisorVmError>;
 
+/// Dirty-page bitmap and number of bytes represented by each bit.
+#[derive(Debug)]
+pub struct DirtyLog {
+    pub bitmap: Vec<u64>,
+    pub bytes_per_bit: NonZeroU64,
+}
+
 /// Configuration data for legacy interrupts.
 ///
 /// On x86 platforms, legacy interrupts means those interrupts routed through PICs or IOAPICs.
@@ -440,8 +448,8 @@ pub trait Vm: Send + Sync + Any {
     fn start_dirty_log(&self) -> Result<()>;
     /// Stop logging dirty pages
     fn stop_dirty_log(&self) -> Result<()>;
-    /// Get dirty pages bitmap
-    fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<Vec<u64>>;
+    /// Get dirty pages bitmap and its backend-defined byte granularity.
+    fn get_dirty_log(&self, slot: u32, base_gpa: u64, memory_size: u64) -> Result<DirtyLog>;
     #[cfg(feature = "sev_snp")]
     /// Initialize SEV-SNP on this VM
     fn sev_snp_init(&self, guest_policy: SnpPolicy) -> Result<()>;
