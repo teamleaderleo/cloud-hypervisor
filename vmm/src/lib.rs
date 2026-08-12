@@ -2008,18 +2008,6 @@ impl Vmm {
                     Some(memory_restore_mode),
                 )?;
 
-                if self
-                    .vm_config
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .landlock_enable
-                {
-                    let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
-                    apply_landlock(&mut config).map_err(VmError::ApplyLandlock)?;
-                }
-
                 // Now we can restore the rest of the VM.
                 // PANIC: won't panic, we just checked that the VM is there.
                 vm.restore()?;

@@ -19,6 +19,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::num::Wrapping;
 use std::ops::Deref;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::Instant;
@@ -106,6 +107,7 @@ use crate::landlock::LandlockError;
 use crate::memory_manager;
 use crate::memory_manager::{
     Error as MemoryManagerError, MemoryManager, MemoryManagerSnapshotData, MemoryRangePolicy,
+    SNAPSHOT_FILENAME,
 };
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::migration::url_to_file;
@@ -115,8 +117,9 @@ use crate::sev::MeasuredBootInfo;
 #[cfg(feature = "fw_cfg")]
 use crate::vm_config::FwCfgConfig;
 use crate::vm_config::{
-    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, HotplugMethod, NetConfig,
-    NumaConfig, PayloadConfig, PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, HotplugMethod, LandlockConfig,
+    NetConfig, NumaConfig, PayloadConfig, PmemConfig, UserDeviceConfig, VdpaConfig, VmConfig,
+    VsockConfig,
 };
 use crate::{
     CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, GuestMemoryMmap,
@@ -1356,6 +1359,37 @@ impl Vm {
         memory_restore_mode: Option<MemoryRestoreMode>,
     ) -> Result<Self> {
         trace_scoped!("Vm::new");
+
+        if snapshot_from_id(snapshot, MEMORY_MANAGER_SNAPSHOT_ID).is_some()
+            && vm_config.lock().unwrap().landlock_enable
+            && let Some(source_url) = source_url
+        {
+            let mut memory_file_path = url_to_path(source_url)
+                .map_err(MemoryManagerError::Restore)
+                .map_err(Error::MemoryManager)?;
+            memory_file_path.push(SNAPSHOT_FILENAME);
+
+            let mut additional_rules = vec![LandlockConfig {
+                path: memory_file_path,
+                access: "r".to_string(),
+            }];
+            if matches!(
+                memory_restore_mode.as_ref(),
+                Some(MemoryRestoreMode::OnDemand)
+            ) && Path::new("/dev/userfaultfd").exists()
+            {
+                additional_rules.push(LandlockConfig {
+                    path: "/dev/userfaultfd".into(),
+                    access: "rw".to_string(),
+                });
+            }
+
+            vm_config
+                .lock()
+                .unwrap()
+                .apply_landlock_with_additional_rules(&additional_rules)
+                .map_err(Error::ApplyLandlock)?;
+        }
 
         #[cfg(not(target_arch = "riscv64"))]
         let timestamp = Instant::now();
