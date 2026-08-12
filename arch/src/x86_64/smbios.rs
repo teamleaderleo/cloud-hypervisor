@@ -38,6 +38,9 @@ pub enum Error {
     /// SMBIOS string index overflow (u8 limit reached).
     #[error("SMBIOS string index overflow (u8 limit reached: {})", u8::MAX)]
     TooManyStrings,
+    /// SMBIOS strings cannot contain an embedded NUL byte.
+    #[error("SMBIOS string contains an embedded NUL byte")]
+    StringContainsNul,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -216,6 +219,9 @@ fn write_string(
     val: &str,
     mut curptr: GuestAddress,
 ) -> Result<GuestAddress> {
+    if val.as_bytes().contains(&0) {
+        return Err(Error::StringContainsNul);
+    }
     for c in val.as_bytes().iter() {
         curptr = write_and_incr(mem, *c, curptr)?;
     }
@@ -649,6 +655,21 @@ mod unit_tests {
         }
         let err = alloc_index(&mut next, true).unwrap_err();
         assert!(matches!(err, Error::TooManyStrings));
+    }
+
+    #[test]
+    fn smbios_embedded_nul_string_is_rejected() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 4096)]).unwrap();
+        let smbios = SmbiosConfig {
+            system: Some(SmbiosSystem {
+                manufacturer: Some("maker\0shadow".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = setup_smbios(&mem, Some(&smbios)).unwrap_err();
+        assert!(matches!(err, Error::StringContainsNul));
     }
 
     #[test]
