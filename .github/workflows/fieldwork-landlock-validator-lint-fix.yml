@@ -1,0 +1,55 @@
+name: Fieldwork Landlock validator lint fix
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/landlock-restore-validation-materializer
+
+permissions:
+  contents: write
+
+jobs:
+  fix-validator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout materializer branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Apply test-only lint correction
+        env:
+          VALIDATION_HEAD: 2c841b719b118f0f640a82249a3b9b5c3f21260f
+          VALIDATION_BRANCH: linux-fieldwork/landlock-restore-order-v4-validation
+        run: |
+          set -eufo pipefail
+          git checkout --detach "$VALIDATION_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("cloud-hypervisor/tests/integration.rs")
+          text = path.read_text()
+          replacements = [
+              (
+                  "use serde_json::{Value, json};",
+                  "use serde_json::{Value, from_slice, json, to_vec_pretty};",
+              ),
+              ("serde_json::from_slice", "from_slice"),
+              ("serde_json::to_vec_pretty", "to_vec_pretty"),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one {old!r}, found {count}")
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          git diff --check
+          git config user.name 'Leo'
+          git config user.email 'cheerleaderleo@outlook.com'
+          git add cloud-hypervisor/tests/integration.rs
+          git commit -m 'tests: satisfy absolute-path lint in restore validator' \
+            -m 'Import the serde_json helpers used by the Fieldwork validation test directly. This changes only test packaging and keeps the restore discriminator unchanged.' \
+            -m 'Assisted-by: ChatGPT:GPT-5.6 Sol' \
+            -m 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
+          git push origin "HEAD:refs/heads/$VALIDATION_BRANCH"
