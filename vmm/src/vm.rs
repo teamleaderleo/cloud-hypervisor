@@ -1427,6 +1427,14 @@ impl Vm {
                 .map_err(Error::MemoryManager)?
             };
 
+        if snapshot.is_some() && vm_config.lock().unwrap().landlock_enable {
+            vm_config
+                .lock()
+                .unwrap()
+                .apply_landlock()
+                .map_err(Error::ApplyLandlock)?;
+        }
+
         Vm::new_from_memory_manager(
             vm_config,
             memory_manager,
