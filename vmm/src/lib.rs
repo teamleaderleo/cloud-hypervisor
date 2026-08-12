@@ -63,7 +63,8 @@ use crate::migration::transport::{
     self, ReceiveAdditionalConnections, ReceiveListener, SendAdditionalConnections, SocketStream,
 };
 use crate::migration::worker::{
-    MigrationSeccompFilters, MigrationWorker, MigrationWorkerHandle, MigrationWorkerResult,
+    MigrationCommitState, MigrationSeccompFilters, MigrationWorker, MigrationWorkerHandle,
+    MigrationWorkerResult,
 };
 use crate::migration::{recv_vm_config, recv_vm_state};
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
@@ -1581,6 +1582,22 @@ impl Vmm {
         Ok(())
     }
 
+    fn send_complete_request(
+        socket: &mut SocketStream,
+        request: Request,
+        migration_commit_state: &mut MigrationCommitState,
+    ) -> result::Result<Duration, MigratableError> {
+        let begin = Instant::now();
+        request.write_to(socket)?;
+        *migration_commit_state = MigrationCommitState::CommitUnknown;
+        transport::expect_ok_response(
+            socket,
+            MigratableError::MigrateSend(anyhow!("Error completing migration")),
+        )?;
+        *migration_commit_state = MigrationCommitState::Committed;
+        Ok(begin.elapsed())
+    }
+
     /// Performs a migration.
     ///
     /// Runs after-migration cleanup only on success. Callers must handle failed
@@ -1592,6 +1609,7 @@ impl Vmm {
         send_data_migration: &VmSendMigrationData,
         initial_vm_state: VmState,
         seccomp_filters: &MigrationSeccompFilters,
+        migration_commit_state: &mut MigrationCommitState,
     ) -> result::Result<(), MigratableError> {
         // State machine that is updated with more context as we progress.
         let mut ctx = OngoingMigrationContext::new();
@@ -1778,13 +1796,8 @@ impl Vmm {
         } else {
             Request::complete_paused()
         };
-        let (_, complete_duration) = measure_ok(|| {
-            transport::send_request_expect_ok(
-                &mut socket,
-                complete_req,
-                MigratableError::MigrateSend(anyhow!("Error completing migration")),
-            )
-        })?;
+        let complete_duration =
+            Self::send_complete_request(&mut socket, complete_req, migration_commit_state)?;
 
         let ctx = ctx
             .finalize(snapshot_duration, send_snapshot_duration, complete_duration)
@@ -2041,6 +2054,7 @@ impl Vmm {
         let MigrationWorkerResult {
             vm,
             migration_result: migration_res,
+            migration_commit_state,
             initial_vm_state,
             preserve_source,
         } = migration_worker_handle.join();
@@ -2086,12 +2100,37 @@ impl Vmm {
                     error!("Failed exiting the VMM after migration: {e}");
                 }
             }
-            Err(e) => {
+            Err(e) if migration_commit_state.rollback_safe() => {
                 error!(
-                    "Migration failed: {}",
+                    "Migration failed before the remote commit boundary: {}",
                     util::flatten_error_chain_to_string(&e)
                 );
                 try_resume_vm_after_failed_migration(vm);
+            }
+            Err(e) => {
+                error!(
+                    "Migration failed after Complete may have reached the receiver ({migration_commit_state:?}); source will not be resumed automatically: {}",
+                    util::flatten_error_chain_to_string(&e)
+                );
+                let mut vm = vm;
+                if preserve_source {
+                    let _ = vm.stop_dirty_log().inspect_err(|stop_err| {
+                        warn!("Failed stopping dirty log on preserved source after commit-risk migration failure: {stop_err}");
+                    });
+                    self.vm = VmOwnership::Owned(vm);
+                } else {
+                    self.vm = VmOwnership::None;
+                    if let Err(shutdown_err) = vm.shutdown() {
+                        error!(
+                            "Failed shutting down source after commit-risk migration failure: {shutdown_err}"
+                        );
+                    }
+                    if let Err(exit_err) = self.exit_evt.write(1) {
+                        error!(
+                            "Failed exiting VMM after commit-risk migration failure: {exit_err}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -3439,6 +3478,7 @@ mod util {
 }
 #[cfg(test)]
 mod unit_tests {
+    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
 
     use arch::CpuProfile;
@@ -3452,6 +3492,51 @@ mod unit_tests {
         CpusConfig, DeviceConfig, HotplugMethod, MemoryConfig, MemoryZoneConfig, PayloadConfig,
         PciDeviceCommonConfig, PlatformConfig, RngConfig, SerialConfig,
     };
+
+    #[test]
+    fn complete_ack_loss_is_commit_unknown() {
+        let (source, receiver) = UnixStream::pair().unwrap();
+        let mut source = SocketStream::Unix(source);
+        let mut receiver = SocketStream::Unix(receiver);
+        let receiver_thread = thread::spawn(move || {
+            let request = Request::read_from(&mut receiver).unwrap();
+            assert_eq!(request.command(), Command::Complete);
+            drop(receiver);
+        });
+        let mut state = MigrationCommitState::RollbackSafe;
+        Vmm::send_complete_request(&mut source, Request::complete(), &mut state).unwrap_err();
+        receiver_thread.join().unwrap();
+        assert_eq!(state, MigrationCommitState::CommitUnknown);
+        assert!(!state.rollback_safe());
+    }
+
+    #[test]
+    fn complete_ok_is_committed() {
+        let (source, receiver) = UnixStream::pair().unwrap();
+        let mut source = SocketStream::Unix(source);
+        let mut receiver = SocketStream::Unix(receiver);
+        let receiver_thread = thread::spawn(move || {
+            let request = Request::read_from(&mut receiver).unwrap();
+            assert_eq!(request.command(), Command::Complete);
+            Response::ok().write_to(&mut receiver).unwrap();
+        });
+        let mut state = MigrationCommitState::RollbackSafe;
+        Vmm::send_complete_request(&mut source, Request::complete(), &mut state).unwrap();
+        receiver_thread.join().unwrap();
+        assert_eq!(state, MigrationCommitState::Committed);
+        assert!(!state.rollback_safe());
+    }
+
+    #[test]
+    fn complete_write_failure_remains_rollback_safe() {
+        let (source, receiver) = UnixStream::pair().unwrap();
+        drop(receiver);
+        let mut source = SocketStream::Unix(source);
+        let mut state = MigrationCommitState::RollbackSafe;
+        Vmm::send_complete_request(&mut source, Request::complete(), &mut state).unwrap_err();
+        assert_eq!(state, MigrationCommitState::RollbackSafe);
+        assert!(state.rollback_safe());
+    }
 
     fn create_dummy_vmm() -> Vmm {
         Vmm::new(

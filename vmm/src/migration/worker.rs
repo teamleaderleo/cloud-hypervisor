@@ -69,6 +69,22 @@ impl Drop for MigrationWorkerHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationCommitState {
+    /// Complete has not been successfully written; source rollback is safe.
+    RollbackSafe,
+    /// Complete was written, but its acknowledgement was not received.
+    CommitUnknown,
+    /// The receiver acknowledged Complete.
+    Committed,
+}
+
+impl MigrationCommitState {
+    pub(crate) fn rollback_safe(self) -> bool {
+        self == Self::RollbackSafe
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MigrationSeccompFilters {
     pub worker: BpfProgram,
@@ -103,6 +119,8 @@ impl MigrationWorker {
 
         let mut vm = self.vm_receiver.recv().expect("VMM should send VM");
 
+        let mut migration_commit_state = MigrationCommitState::RollbackSafe;
+
         // We can't propagate errors early because of the complex return type,
         // therefore we chain the results together.
         let migration_result = seccomp_res
@@ -115,6 +133,7 @@ impl MigrationWorker {
                     &self.config,
                     self.initial_vm_state,
                     &self.seccomp_filters,
+                    &mut migration_commit_state,
                 )
             })
             .inspect(|_| event!("vm", "migration-finished"))
@@ -126,6 +145,7 @@ impl MigrationWorker {
         MigrationWorkerResult {
             vm,
             migration_result,
+            migration_commit_state,
             initial_vm_state: self.initial_vm_state,
             preserve_source: self.config.preserve_source,
         }
@@ -188,6 +208,8 @@ pub struct MigrationWorkerResult {
     pub vm: Vm,
     /// The result of [`Vmm::send_migration`].
     pub migration_result: Result<(), MigratableError>,
+    /// Whether the source still knows it can roll back without racing a committed receiver.
+    pub(crate) migration_commit_state: MigrationCommitState,
     pub initial_vm_state: VmState,
     pub preserve_source: bool,
 }
