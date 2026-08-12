@@ -39,7 +39,7 @@ replace_once(
 
 path = Path("vmm/src/memory_manager.rs")
 text = path.read_text()
-old = "vm_migration::protocol::MemoryRange"
+old = "&[vm_migration::protocol::MemoryRange {"
 if text.count(old) != 2:
-    raise SystemExit(f"expected two fully-qualified MemoryRange uses, found {text.count(old)}")
-path.write_text(text.replace(old, "MemoryRange"))
+    raise SystemExit(f"expected two dirty-log test MemoryRange literals, found {text.count(old)}")
+path.write_text(text.replace(old, "&[MemoryRange {"))
