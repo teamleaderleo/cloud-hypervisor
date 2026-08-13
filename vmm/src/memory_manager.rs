@@ -3443,24 +3443,23 @@ fn dirty_bitmap_to_range_table(
         ));
     }
 
-    let dirty_bitmap = vm_dirty_log
-        .bitmap
-        .iter()
-        .zip(vmm_dirty_bitmap.iter())
-        .map(|(vm, vmm)| vm | vmm)
-        .collect::<Vec<_>>();
-
     let tail_bits = (page_count % u64::BITS as u64) as u32;
     if tail_bits != 0 {
         let valid_mask = (1u64 << tail_bits) - 1;
-        if let Some(last_word) = dirty_bitmap.last()
-            && last_word & !valid_mask != 0
-        {
+        let last_word =
+            vm_dirty_log.bitmap[expected_words - 1] | vmm_dirty_bitmap[expected_words - 1];
+        if last_word & !valid_mask != 0 {
             return Err(anyhow!(
                 "Dirty bitmap contains bits outside the memory region"
             ));
         }
     }
+
+    let dirty_bitmap = vm_dirty_log
+        .bitmap
+        .iter()
+        .zip(vmm_dirty_bitmap.iter())
+        .map(|(vm, vmm)| vm | vmm);
 
     Ok(MemoryRangeTable::from_dirty_bitmap(
         dirty_bitmap,
@@ -3662,15 +3661,17 @@ mod dirty_log_tests {
     #[test]
     fn test_dirty_log_rejects_bits_outside_region() {
         let bytes_per_bit = 0x4000;
-        let error = dirty_bitmap_to_range_table(
-            &dirty_log(vec![1 << 2], bytes_per_bit),
-            &[0],
-            page_size(bytes_per_bit),
-            BASE_GPA,
-            bytes_per_bit * 2,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("outside the memory region"));
+        for (vm_bitmap, vmm_bitmap) in [(vec![1 << 2], vec![0]), (vec![0], vec![1 << 2])] {
+            let error = dirty_bitmap_to_range_table(
+                &dirty_log(vm_bitmap, bytes_per_bit),
+                &vmm_bitmap,
+                page_size(bytes_per_bit),
+                BASE_GPA,
+                bytes_per_bit * 2,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("outside the memory region"));
+        }
     }
 
     #[test]
