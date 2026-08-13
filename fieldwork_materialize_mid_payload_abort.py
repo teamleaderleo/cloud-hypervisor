@@ -16,7 +16,7 @@ if text.count(old_sig) != 1:
 text = text.replace(old_sig, new_sig, 1)
 
 old_read = '''        loop {\n            let bytes_read = mem\n                .read_volatile_from(\n'''
-new_read = '''        loop {\n            if let Some(kill_evt) = kill_evt {\n                if !wait_for_readable(socket, kill_evt)\n                    .context("Failed to poll memory payload fds")\n                    .map_err(MigratableError::MigrateReceive)?\n                {\n                    return Ok(false);\n                }\n            }\n\n            let bytes_read = mem\n                .read_volatile_from(\n'''
+new_read = '''        loop {\n            if let Some(kill_evt) = kill_evt\n                && !wait_for_readable(socket, kill_evt)\n                    .context("Failed to poll memory payload fds")\n                    .map_err(MigratableError::MigrateReceive)?\n            {\n                return Ok(false);\n            }\n\n            let bytes_read = mem\n                .read_volatile_from(\n'''
 if text.count(old_read) != 1:
     raise SystemExit(f'payload read anchor count={text.count(old_read)}')
 text = text.replace(old_read, new_read, 1)
@@ -27,7 +27,6 @@ if text.count(old_tail) != 1:
     raise SystemExit(f'receive tail anchor count={text.count(old_tail)}')
 text = text.replace(old_tail, new_tail, 1)
 
-# Append a target-native regression that drives the real auxiliary worker.
 marker = 'fn test_memory_worker_abort_interrupts_stalled_payload()'
 if marker in text:
     raise SystemExit('regression already present')
