@@ -10,7 +10,10 @@ insert = r'''
 
     #[test]
     fn test_receive_request_eof_emits_failure_event() {
+        use std::env;
+        use std::fs;
         use std::os::unix::net::UnixStream;
+        use std::process;
         use std::thread;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,9 +22,9 @@ insert = r'''
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let socket_path = std::env::temp_dir().join(format!(
+        let socket_path = env::temp_dir().join(format!(
             "cloud-hypervisor-migration-eof-{}-{unique}.sock",
-            std::process::id()
+            process::id()
         ));
 
         let client_path = socket_path.clone();
@@ -43,7 +46,7 @@ insert = r'''
 
         let result = vmm.vm_receive_migration(data);
         connector.join().unwrap();
-        let _ = std::fs::remove_file(&socket_path);
+        let _ = fs::remove_file(&socket_path);
         assert!(result.is_err(), "peer EOF should fail the receive attempt");
 
         let events: Vec<String> = monitor.rx.try_iter().collect();
