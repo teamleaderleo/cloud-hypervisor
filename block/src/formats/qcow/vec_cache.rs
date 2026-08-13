@@ -141,16 +141,19 @@ impl<T: Cacheable> CacheMap<T> {
     // Check if the refblock cache is full and we need to evict.
     pub(super) fn insert<F>(&mut self, index: usize, block: T, write_callback: F) -> io::Result<()>
     where
-        F: FnOnce(usize, T) -> io::Result<()>,
+        F: FnOnce(usize, &T) -> io::Result<()>,
     {
         if self.map.len() == self.capacity {
             // TODO(dgreid) - smarter eviction strategy.
             let to_evict = *self.map.iter().next().unwrap().0;
-            if let Some(evicted) = self.map.remove(&to_evict)
+            if let Some(evicted) = self.map.get(&to_evict)
                 && evicted.dirty()
             {
+                // Keep the dirty victim resident until its write succeeds so
+                // an I/O error leaves a retryable in-memory copy.
                 write_callback(to_evict, evicted)?;
             }
+            self.map.remove(&to_evict);
         }
         self.map.insert(index, block);
         Ok(())
@@ -206,5 +209,20 @@ mod unit_tests {
         let num_items = (0..=3).filter(|k| cache.contains_key(*k)).count();
         assert_eq!(num_items, 3);
         assert!(cache.contains_key(3));
+    }
+
+    #[test]
+    fn failed_eviction_keeps_dirty_victim() {
+        let mut cache = CacheMap::<NumCache>::new(1);
+        cache.insert(0, NumCache(()), |_index, _| Ok(())).unwrap();
+
+        let err = cache
+            .insert(1, NumCache(()), |_index, _| {
+                Err(io::Error::other("injected eviction write failure"))
+            })
+            .expect_err("dirty eviction callback must fail");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(cache.contains_key(0));
+        assert!(!cache.contains_key(1));
     }
 }
