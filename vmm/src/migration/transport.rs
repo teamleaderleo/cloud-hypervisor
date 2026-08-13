@@ -4,6 +4,7 @@
 //
 
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem;
 use std::net::{TcpListener, TcpStream};
 use std::num::{NonZeroU32, ParseIntError};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -767,21 +768,24 @@ impl SendAdditionalConnections {
             // Every memory sending thread receives messages from the main thread through this
             // channel. The lock is necessary to synchronize the multiple consumers. If the
             // workers are very quick, lock contention could become a performance issue.
-            let message = message_rx
-                .lock()
-                .map_err(|_| MigratableError::MigrateSend(anyhow!("message_rx mutex is poisoned")))
-                .inspect_err(|_| {
-                    worker_error.store(true, Ordering::Relaxed);
-                    // We ignore errors during error handling.
-                    notify_tx.send(SendMemoryThreadNotify::Error).ok();
-                })?
-                .recv()
-                .context("Error receiving message from main thread")
-                .map_err(MigratableError::MigrateSend)
-                .inspect_err(|_| {
-                    worker_error.store(true, Ordering::Relaxed);
-                    notify_tx.send(SendMemoryThreadNotify::Error).ok();
-                })?;
+            let message = {
+                let message_rx = message_rx
+                    .lock()
+                    .map_err(|_| {
+                        MigratableError::MigrateSend(anyhow!("message_rx mutex is poisoned"))
+                    })
+                    .inspect_err(|_| {
+                        worker_error.store(true, Ordering::Relaxed);
+                        // We ignore errors during error handling.
+                        notify_tx.send(SendMemoryThreadNotify::Error).ok();
+                    })?;
+                match message_rx.recv() {
+                    Ok(message) => message,
+                    // The main thread closes the work channel as the guaranteed terminal
+                    // condition during cleanup. Queued work is drained before this point.
+                    Err(_) => return Ok(()),
+                }
+            };
             match message {
                 SendMemoryThreadMessage::Memory(table) => {
                     send_memory_ranges(guest_memory, &table, socket)
@@ -910,16 +914,14 @@ impl SendAdditionalConnections {
         }
     }
 
-    /// Sends disconnect messages to all workers and joins them.
+    /// Closes the work channel and joins all workers.
     pub(crate) fn cleanup(&mut self) -> Result<(), MigratableError> {
-        // Send disconnect messages to all workers.
-        for _ in 0..self.threads.len() {
-            // All threads may have terminated, leading to a dropped receiver. Thus we ignore
-            // errors here.
-            self.message_tx
-                .try_send(SendMemoryThreadMessage::Disconnect)
-                .ok();
-        }
+        // Closing the work channel is independent of bounded-queue capacity. Workers
+        // drain already queued work and then receive the terminal disconnect state.
+        let (closed_tx, closed_rx) = sync_channel(0);
+        drop(closed_rx);
+        let message_tx = mem::replace(&mut self.message_tx, closed_tx);
+        drop(message_tx);
 
         let mut first_err = Ok(());
         self.threads.drain(..).for_each(|thread| {
@@ -1283,6 +1285,123 @@ pub(crate) fn receive_memory_ranges(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod sender_cleanup_tests {
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::{channel, sync_channel};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use vm_migration::MigratableError;
+
+    use crate::sync_utils::Gate;
+
+    use super::{
+        GuestAddress, GuestMemoryAtomic, GuestMemoryMmap, SendAdditionalConnections,
+        SendMemoryThreadMessage, SendMemoryThreadNotify, SocketStream,
+    };
+
+    fn guest_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
+        GuestMemoryAtomic::new(GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap())
+    }
+
+    #[test]
+    fn cleanup_closes_full_queue_and_joins_worker() {
+        let guest_memory = guest_memory();
+        let (message_tx, message_rx) = sync_channel(1);
+        let gate = Arc::new(Gate::new());
+        gate.open();
+        message_tx
+            .send(SendMemoryThreadMessage::Gate(gate))
+            .unwrap();
+
+        let message_rx = Arc::new(Mutex::new(message_rx));
+        let worker_error = Arc::new(AtomicBool::new(false));
+        let (notify_tx, notify_rx) = channel();
+        let (socket, peer) = UnixStream::pair().unwrap();
+        let mut socket = SocketStream::Unix(socket);
+        let guest_memory_t = guest_memory.clone();
+        let message_rx_t = message_rx.clone();
+        let worker_error_t = worker_error.clone();
+        let worker = thread::spawn(move || -> Result<(), MigratableError> {
+            SendAdditionalConnections::worker_send_memory(
+                &mut socket,
+                &guest_memory_t,
+                &message_rx_t,
+                &worker_error_t,
+                &notify_tx,
+            )
+        });
+
+        let mut connections = SendAdditionalConnections {
+            guest_memory,
+            threads: vec![worker],
+            message_tx,
+            worker_error,
+            notify_rx,
+        };
+
+        connections.cleanup().unwrap();
+        assert!(connections.threads.is_empty());
+        drop(peer);
+    }
+
+    #[test]
+    fn workers_release_receiver_before_waiting_at_gate() {
+        let guest_memory = guest_memory();
+        let (message_tx, message_rx) = sync_channel(2);
+        let message_rx = Arc::new(Mutex::new(message_rx));
+        let worker_error = Arc::new(AtomicBool::new(false));
+        let (notify_tx, notify_rx) = channel();
+        let gate = Arc::new(Gate::new());
+
+        message_tx
+            .send(SendMemoryThreadMessage::Gate(gate.clone()))
+            .unwrap();
+        message_tx
+            .send(SendMemoryThreadMessage::Gate(gate.clone()))
+            .unwrap();
+
+        let mut workers = Vec::new();
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let (socket, peer) = UnixStream::pair().unwrap();
+            peers.push(peer);
+            let mut socket = SocketStream::Unix(socket);
+            let guest_memory_t = guest_memory.clone();
+            let message_rx_t = message_rx.clone();
+            let worker_error_t = worker_error.clone();
+            let notify_tx_t = notify_tx.clone();
+            workers.push(thread::spawn(move || -> Result<(), MigratableError> {
+                SendAdditionalConnections::worker_send_memory(
+                    &mut socket,
+                    &guest_memory_t,
+                    &message_rx_t,
+                    &worker_error_t,
+                    &notify_tx_t,
+                )
+            }));
+        }
+        drop(notify_tx);
+
+        for _ in 0..2 {
+            assert!(matches!(
+                notify_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                SendMemoryThreadNotify::Gate
+            ));
+        }
+
+        gate.open();
+        drop(message_tx);
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        drop(peers);
+    }
 }
 
 #[cfg(test)]
