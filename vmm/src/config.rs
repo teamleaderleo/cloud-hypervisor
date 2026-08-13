@@ -229,6 +229,10 @@ pub enum ValidationError {
     /// Max is less than boot
     #[error("Max CPUs ({0}) lower than boot CPUs ({1})")]
     CpusMaxLowerThanBoot(u32 /* max vCPUs */, u32 /* boot vCPUs */),
+    #[cfg(target_arch = "aarch64")]
+    /// CPU hotplug is unsupported on AArch64.
+    #[error("CPU hotplug is not supported on AArch64")]
+    Aarch64CpuHotplugUnsupported,
     /// Too many CPUs.
     #[error("Too many CPUs: specified {0} but {MAX_SUPPORTED_CPUS} is the limit")]
     TooManyCpus(u32 /* specified CPUs */),
@@ -3302,6 +3306,11 @@ impl VmConfig {
             ));
         }
 
+        #[cfg(target_arch = "aarch64")]
+        if self.cpus.max_vcpus != self.cpus.boot_vcpus {
+            return Err(ValidationError::Aarch64CpuHotplugUnsupported);
+        }
+
         if self.cpus.max_vcpus > MAX_SUPPORTED_CPUS {
             // Note: historically, Cloud Hypervisor did not support more than 255(254 on x64)
             // vCPUs: self.cpus.max_vcpus was of type u8, so 255 was the maximum;
@@ -5957,6 +5966,34 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             packages: 1,
         });
         still_valid_config.validate().unwrap();
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            let mut invalid_config = valid_config.clone();
+            invalid_config.cpus.max_vcpus = 4;
+            invalid_config.cpus.boot_vcpus = 2;
+            invalid_config.cpus.topology = Some(CpuTopology {
+                threads_per_core: 1,
+                cores_per_die: 4,
+                dies_per_package: 1,
+                packages: 1,
+            });
+            assert_eq!(
+                invalid_config.validate(),
+                Err(ValidationError::Aarch64CpuHotplugUnsupported)
+            );
+
+            let mut still_valid_config = valid_config.clone();
+            still_valid_config.cpus.max_vcpus = 4;
+            still_valid_config.cpus.boot_vcpus = 4;
+            still_valid_config.cpus.topology = Some(CpuTopology {
+                threads_per_core: 1,
+                cores_per_die: 4,
+                dies_per_package: 1,
+                packages: 1,
+            });
+            still_valid_config.validate().unwrap();
+        }
 
         #[cfg(target_arch = "x86_64")]
         {
