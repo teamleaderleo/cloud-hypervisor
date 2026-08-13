@@ -164,6 +164,10 @@ pub enum Error {
     #[error("Error initialising GICR base address")]
     VcpuSetGicrBaseAddr(#[source] hypervisor::HypervisorCpuError),
 
+    #[cfg(target_arch = "aarch64")]
+    #[error("Failed to read cache topology")]
+    CacheTopology(#[source] arch::aarch64::cache::Error),
+
     #[error("Failed to join on vCPU threads: {0:?}")]
     ThreadCleanup(Box<dyn any::Any + Send>),
 
@@ -1974,7 +1978,7 @@ impl CpuManager {
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub fn create_pptt(&self) -> PPTT {
+    pub fn create_pptt(&self) -> Result<PPTT> {
         let mut cpus = 0;
         let mut uid = 0;
         // If topology is not specified, the default setting is:
@@ -1986,7 +1990,7 @@ impl CpuManager {
         let cores_per_package = cores_per_die * dies_per_package;
 
         // Add cache info.
-        let cache_info = read_cache_topology();
+        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;
         let CacheTopologyInfo {
             l1_d_cache_size,
             l1_d_cache_line_size,
@@ -2121,7 +2125,7 @@ impl CpuManager {
             }
         }
 
-        pptt
+        Ok(pptt)
     }
 
     #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]

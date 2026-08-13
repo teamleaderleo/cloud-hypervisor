@@ -32,7 +32,7 @@ pub const _NSIG: i32 = 65;
 pub enum Error {
     /// Failed to create a FDT.
     #[error("Failed to create a FDT")]
-    SetupFdt,
+    SetupFdt(#[source] fdt::Error),
 
     /// Failed to write FDT to memory.
     #[error("Failed to write FDT to memory")]
@@ -151,7 +151,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
         virtio_iommu_bdf,
         pmu_supported,
     )
-    .map_err(|_| Error::SetupFdt)?;
+    .map_err(Error::SetupFdt)?;
 
     if log_enabled!(Level::Debug) {
         fdt::print_fdt(&fdt_final);
