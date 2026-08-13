@@ -48,6 +48,7 @@ jobs:
           cd /tmp/landlock-candidate
           cargo +1.89.0 fmt --all
           test "$(git diff --name-only)" = "$TEST_PATH"
+          grep -F 'fn test_snapshot_restore_landlock_qcow_backing()' "$TEST_PATH"
           cp "$TEST_PATH" "/tmp/landlock-baseline/$TEST_PATH"
           test "$(git hash-object "$TEST_PATH")" = "$(git -C /tmp/landlock-baseline hash-object "$TEST_PATH")"
       - name: Compile candidate validator
@@ -63,12 +64,6 @@ jobs:
             echo "::error title=Landlock candidate compile::$msg"
             exit "$rc"
           fi
-      - name: List candidate validator test
-        working-directory: /tmp/landlock-candidate
-        run: |
-          set -euo pipefail
-          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm -- --list | tee /tmp/candidate-tests.txt
-          grep -F 'test_snapshot_restore_landlock_qcow_backing' /tmp/candidate-tests.txt
           cargo +1.89.0 fmt --all -- --check
           git diff --check
       - name: Compile baseline validator
@@ -84,14 +79,9 @@ jobs:
             echo "::error title=Landlock baseline compile::$msg"
             exit "$rc"
           fi
-      - name: List baseline validator test and verify blob identity
-        working-directory: /tmp/landlock-baseline
-        run: |
-          set -euo pipefail
-          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm -- --list | tee /tmp/baseline-tests.txt
-          grep -F 'test_snapshot_restore_landlock_qcow_backing' /tmp/baseline-tests.txt
           cargo +1.89.0 fmt --all -- --check
           git diff --check
+          grep -F 'fn test_snapshot_restore_landlock_qcow_backing()' "$TEST_PATH"
           test "$(git hash-object "$TEST_PATH")" = "$(git -C /tmp/landlock-candidate hash-object "$TEST_PATH")"
       - name: Commit identical test blobs
         run: |
@@ -107,5 +97,6 @@ jobs:
           test "$(git -C /tmp/landlock-candidate rev-parse HEAD:"$TEST_PATH")" = "$(git -C /tmp/landlock-baseline rev-parse HEAD:"$TEST_PATH")"
       - name: Publish paired validator branches
         run: |
+          set -euo pipefail
           git -C /tmp/landlock-candidate push --force origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
           git -C /tmp/landlock-baseline push --force origin "HEAD:refs/heads/$BASELINE_BRANCH"
