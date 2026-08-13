@@ -27,8 +27,8 @@ jobs:
           //
           // SPDX-License-Identifier: Apache-2.0
 
-          pub const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
-          pub const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
+          pub(crate) const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
+          pub(crate) const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
 
           #[derive(Clone, Debug, Default, PartialEq, Eq)]
           pub struct SmbiosConfig {
@@ -73,10 +73,10 @@ jobs:
           p = Path("arch/src/x86_64/smbios.rs")
           s = p.read_text()
           import_anchor = "use crate::GuestMemoryMmap;"
-          public_import = "pub use crate::smbios::{\n    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME, SmbiosChassisConfig, SmbiosConfig,\n    SmbiosSystem,\n};\n"
+          imports = "pub use crate::smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};\nuse crate::smbios::{DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME};\n"
           if s.count(import_anchor) != 1:
               raise SystemExit("x86 import anchor drifted")
-          s = s.replace(import_anchor, public_import + import_anchor, 1)
+          s = s.replace(import_anchor, imports + import_anchor, 1)
           start = s.find("pub const DEFAULT_SYSTEM_MANUFACTURER")
           end = s.find("fn compute_checksum", start)
           if start < 0 or end < 0:
@@ -111,15 +111,10 @@ jobs:
           set -euo pipefail
           mkdir -p arch/tests
           cat > arch/tests/fieldwork_smbios_public_api.rs <<'RS'
-          use arch::x86_64::smbios::{
-              DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME, SmbiosChassisConfig,
-              SmbiosConfig, SmbiosSystem,
-          };
+          use arch::x86_64::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};
 
           #[test]
-          fn existing_x86_smbios_public_symbols_remain_importable() {
-              assert_eq!(DEFAULT_SYSTEM_MANUFACTURER, "Cloud Hypervisor");
-              assert_eq!(DEFAULT_SYSTEM_PRODUCT_NAME, "cloud-hypervisor");
+          fn existing_x86_smbios_types_remain_importable() {
               let _ = SmbiosConfig::default();
               let _ = SmbiosSystem::default();
               let _ = SmbiosChassisConfig::default();
@@ -156,6 +151,6 @@ jobs:
           git config user.name Leo
           git config user.email cheerleaderleo@outlook.com
           git add arch/src/lib.rs arch/src/smbios.rs arch/src/x86_64/smbios.rs vmm/src/vm_config.rs
-          git commit -s -m 'arch: share SMBIOS configuration model across architectures' -m 'Move the SMBIOS configuration data model into common arch code so platform configuration can construct it on every architecture. Preserve the existing x86 public type and default-string paths through re-exports; table generation and placement remain x86-specific.'
+          git commit -s -m 'arch: share SMBIOS configuration model across architectures' -m 'Move the SMBIOS configuration data model into common arch code so platform configuration can construct it on every architecture. Preserve the existing x86 public type re-exports; table generation, default strings, and placement remain architecture-specific implementation details.'
           test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
           git push origin +HEAD:refs/heads/linux-fieldwork/smbios-common-model-source
