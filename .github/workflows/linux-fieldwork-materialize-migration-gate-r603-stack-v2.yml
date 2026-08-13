@@ -2,10 +2,8 @@ name: Linux Fieldwork materialize migration Gate repair stack
 
 on:
   push:
-    branches:
-      - linux-fieldwork/materialize-migration-gate-r603-stack-v2
-    paths:
-      - .github/workflows/linux-fieldwork-materialize-migration-gate-r603-stack-v2.yml
+    branches: [linux-fieldwork/materialize-migration-gate-r603-stack-v2]
+    paths: [.github/workflows/linux-fieldwork-materialize-migration-gate-r603-stack-v2.yml]
   workflow_dispatch:
 
 permissions:
@@ -18,201 +16,84 @@ jobs:
     env:
       BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
       CLEANUP_HEAD: d00772228614a84111d8da4f0fa30f9145d84954
+      GATE_HEAD: a90f82c4d313ab2fdfad2b25293ad93e2f30ffb6
+      GATE_BRANCH: linux-fieldwork/review-migration-gate-r603
       TARGET_BRANCH: linux-fieldwork/review-migration-gate-r603
     steps:
-      - name: Check out controlled fork
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Reset to repaired cleanup commit
+      - name: Reset base and fetch reviewed Gate commit
         run: |
           set -euo pipefail
           git config user.name Leo
           git config user.email cheerleaderleo@outlook.com
           git reset --hard "$CLEANUP_HEAD"
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
-          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
-
-      - name: Reconstruct Gate enqueue commit on repaired base
-        shell: bash
+          git fetch --no-tags origin "$GATE_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$GATE_HEAD"
+      - name: Reconstruct Gate commit semantically
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('vmm/src/migration/transport.rs')
-          s = p.read_text()
-
-          old_gate = '''        for _ in 0..self.threads.len() {
-              self.message_tx
-                  .send(SendMemoryThreadMessage::Gate(gate.clone()))
-                  .context("Error sending gate message to workers")
-                  .map_err(MigratableError::MigrateSend)?;
-          }
-          '''
-          new_gate = '''        for _ in 0..self.threads.len() {
-              let mut gate_message = SendMemoryThreadMessage::Gate(gate.clone());
-              loop {
-                  if self.worker_error.load(Ordering::Relaxed) {
-                      gate.open();
-                      return self.cleanup();
-                  }
-
-                  match self.message_tx.try_send(gate_message) {
-                      Ok(()) => break,
-                      Err(TrySendError::Full(unsent_message)) => {
-                          thread::sleep(Duration::from_millis(10));
-                          gate_message = unsent_message;
-                      }
-                      Err(TrySendError::Disconnected(_)) => {
-                          gate.open();
-                          return Err(self.cleanup().err().unwrap_or(
-                              MigratableError::MigrateSend(anyhow!(
-                                  "All sending threads disconnected, but none returned an error?"
-                              )),
-                          ));
-                      }
-                  }
-              }
-          }
-          '''
-          if s.count(old_gate) != 1:
-              raise SystemExit(f'unexpected Gate enqueue owner count: {s.count(old_gate)}')
-          s = s.replace(old_gate, new_gate, 1)
-
-          anchor = '#[cfg(test)]\nmod tests {'
-          if s.count(anchor) != 1:
-              raise SystemExit(f'unexpected transport test anchor count: {s.count(anchor)}')
-          gate_tests = r'''#[cfg(test)]
-mod sender_gate_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc::{channel, sync_channel};
-    use std::thread;
-    use std::time::Duration;
-
-    use anyhow::anyhow;
-    use vm_migration::MigratableError;
-    use vm_migration::protocol::MemoryRangeTable;
-
-    use super::{
-        GuestAddress, GuestMemoryAtomic, GuestMemoryMmap, SendAdditionalConnections,
-        SendMemoryThreadMessage, SendMemoryThreadNotify,
-    };
-
-    fn guest_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
-        GuestMemoryAtomic::new(
-            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap(),
-        )
-    }
-
-    #[test]
-    fn full_queue_healthy_worker_completes() {
-        let (message_tx, message_rx) = sync_channel(1);
-        message_tx
-            .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
-            .unwrap();
-        let (notify_tx, notify_rx) = channel();
-        let worker = thread::spawn(move || -> Result<(), MigratableError> {
-            thread::sleep(Duration::from_millis(20));
-            assert!(matches!(
-                message_rx.recv().unwrap(),
-                SendMemoryThreadMessage::Memory(_)
-            ));
-            match message_rx.recv().unwrap() {
-                SendMemoryThreadMessage::Gate(gate) => {
-                    notify_tx.send(SendMemoryThreadNotify::Gate).unwrap();
-                    gate.wait();
-                }
-                _ => panic!("expected Gate after queued Memory"),
-            }
-            message_rx.recv().unwrap_err();
-            Ok(())
-        });
-
-        let mut connections = SendAdditionalConnections {
-            guest_memory: guest_memory(),
-            threads: vec![worker],
-            message_tx,
-            worker_error: Arc::new(AtomicBool::new(false)),
-            notify_rx,
-        };
-
-        connections.wait_for_pending_data().unwrap();
-        connections.cleanup().unwrap();
-    }
-
-    #[test]
-    fn worker_error_does_not_block_gate_enqueue() {
-        let (message_tx, message_rx) = sync_channel(1);
-        message_tx
-            .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
-            .unwrap();
-        let (_notify_tx, notify_rx) = channel();
-        let worker_error = Arc::new(AtomicBool::new(true));
-        let worker = thread::spawn(|| -> Result<(), MigratableError> {
-            Err(MigratableError::MigrateSend(anyhow!(
-                "injected worker failure"
-            )))
-        });
-
-        let mut connections = SendAdditionalConnections {
-            guest_memory: guest_memory(),
-            threads: vec![worker],
-            message_tx,
-            worker_error,
-            notify_rx,
-        };
-
-        let _message_rx = message_rx;
-        let err = connections.wait_for_pending_data().unwrap_err();
-        assert!(matches!(err, MigratableError::MigrateSend(_)));
-    }
-}
-
-'''
-          s = s.replace(anchor, gate_tests + anchor, 1)
-          p.write_text(s)
+          import subprocess
+          path = 'vmm/src/migration/transport.rs'
+          reviewed = subprocess.run(['git', 'show', f'FETCH_HEAD:{path}'], check=True, capture_output=True, text=True).stdout
+          p = Path(path)
+          current = p.read_text()
+          fn_start = '    fn wait_for_pending_data(&mut self) -> Result<(), MigratableError> {'
+          fn_end = '    pub(crate) fn cleanup(&mut self) -> Result<(), MigratableError> {'
+          def segment(text, start, end):
+              a = text.index(start)
+              b = text.index(end, a)
+              return text[a:b]
+          reviewed_fn = segment(reviewed, fn_start, fn_end)
+          current_fn = segment(current, fn_start, fn_end)
+          current = current.replace(current_fn, reviewed_fn, 1)
+          test_start = '#[cfg(test)]\nmod sender_gate_review_tests {'
+          test_end = '#[cfg(test)]\nmod tests {'
+          reviewed_tests = segment(reviewed, test_start, test_end)
+          reviewed_tests = reviewed_tests.replace('mod sender_gate_review_tests {', 'mod sender_gate_tests {', 1)
+          old_tail = '            match message_rx.recv().unwrap() {\n                SendMemoryThreadMessage::Disconnect => Ok(()),\n                _ => panic!("expected Disconnect after Gate"),\n            }'
+          new_tail = '            message_rx.recv().unwrap_err();\n            Ok(())'
+          if reviewed_tests.count(old_tail) != 1:
+              raise SystemExit(f'unexpected Gate terminal count: {reviewed_tests.count(old_tail)}')
+          reviewed_tests = reviewed_tests.replace(old_tail, new_tail, 1)
+          if current.count(test_end) != 1:
+              raise SystemExit(f'unexpected transport test anchor count: {current.count(test_end)}')
+          current = current.replace(test_end, reviewed_tests + test_end, 1)
+          p.write_text(current)
           PY
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "vmm/src/migration/transport.rs"
           git add vmm/src/migration/transport.rs
-          git commit --signoff \
-            -m 'vmm: Keep migration Gate enqueue cancellation-aware' \
-            -m 'Use nonblocking bounded-queue progress for Gate publication so worker failure cannot strand the main migration thread before cleanup. Add full-queue failure and healthy-progress regressions.'
+          git commit --signoff -m 'vmm: Keep migration Gate enqueue cancellation-aware' -m 'Use nonblocking bounded-queue progress for Gate publication so worker failure cannot strand the main migration thread before cleanup. Add full-queue failure and healthy-progress regressions.'
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
-
       - name: Pin toolchain
         run: |
-          set -euo pipefail
           rustup toolchain install 1.89.0 --profile minimal
           rustup component add --toolchain 1.89.0 rustfmt clippy
           rustup override set 1.89.0
-
       - name: Validate stacked migration sender repairs
-        shell: bash
         run: |
           set -euo pipefail
           cargo test -p vmm --features kvm --lib -- --list | tee /tmp/test-list.txt
-          grep -F 'migration::transport::sender_cleanup_tests::cleanup_closes_full_queue_and_joins_worker: test' /tmp/test-list.txt
-          grep -F 'migration::transport::sender_cleanup_tests::workers_release_receiver_before_waiting_at_gate: test' /tmp/test-list.txt
-          grep -F 'migration::transport::sender_gate_tests::full_queue_healthy_worker_completes: test' /tmp/test-list.txt
-          grep -F 'migration::transport::sender_gate_tests::worker_error_does_not_block_gate_enqueue: test' /tmp/test-list.txt
-          timeout --signal=TERM --kill-after=2s 20s \
-            cargo test -p vmm --features kvm --lib migration::transport::sender_cleanup_tests:: -- --nocapture
-          timeout --signal=TERM --kill-after=2s 20s \
-            cargo test -p vmm --features kvm --lib migration::transport::sender_gate_tests:: -- --nocapture
+          grep -F 'sender_cleanup_tests::cleanup_closes_full_queue_and_joins_worker' /tmp/test-list.txt
+          grep -F 'sender_cleanup_tests::workers_release_receiver_before_waiting_at_gate' /tmp/test-list.txt
+          grep -F 'sender_gate_tests::full_queue_healthy_worker_completes' /tmp/test-list.txt
+          grep -F 'sender_gate_tests::worker_error_does_not_block_gate_enqueue' /tmp/test-list.txt
+          timeout --signal=TERM --kill-after=2s 20s cargo test -p vmm --features kvm --lib migration::transport::sender_cleanup_tests:: -- --nocapture
+          timeout --signal=TERM --kill-after=2s 20s cargo test -p vmm --features kvm --lib migration::transport::sender_gate_tests:: -- --nocapture
           cargo test -p vmm --features kvm --lib migration::transport::tests:: -- --nocapture
           cargo check -p vmm --features kvm
           cargo clippy -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations
           cargo fmt --all -- --check
           git diff --check
-
-      - name: Verify stack shape and publish
+      - name: Publish stacked review branch
         run: |
           set -euo pipefail
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
           test "$(git diff --name-only "$CLEANUP_HEAD"..HEAD)" = "vmm/src/migration/transport.rs"
-          git log -2 --format=%B | grep -F 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
           git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
