@@ -1,0 +1,88 @@
+name: Linux Fieldwork materialize repaired migration cleanup
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-migration-cleanup-r581-v2
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-migration-cleanup-r581-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      FIELDWORK_SHA: c9647cd70fbad0c9de6aa1bfb24d5881eb2a48b8
+      TARGET_BRANCH: linux-fieldwork/review-migration-cleanup-r581
+    steps:
+      - name: Check out controlled fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out exact Fieldwork materializer
+        uses: actions/checkout@v4
+        with:
+          repository: teamleaderleo/linux-fieldwork
+          ref: ${{ env.FIELDWORK_SHA }}
+          path: fieldwork
+          persist-credentials: false
+
+      - name: Reset product tree to exact upstream base
+        run: |
+          set -euo pipefail
+          git reset --hard "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git diff --name-only)" = ""
+
+      - name: Pin validation toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+
+      - name: Apply repaired source candidate
+        run: |
+          set -euo pipefail
+          python3 fieldwork/investigations/cloud-hypervisor-migration-sender-cleanup/apply_sender_cleanup_candidate.py
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/migration/transport.rs"
+
+      - name: Validate repaired candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p vmm --features kvm --lib -- --list | tee /tmp/test-list.txt
+          grep -F 'migration::transport::sender_cleanup_tests::cleanup_closes_full_queue_and_joins_worker: test' /tmp/test-list.txt
+          grep -F 'migration::transport::sender_cleanup_tests::workers_release_receiver_before_waiting_at_gate: test' /tmp/test-list.txt
+          timeout --signal=TERM --kill-after=2s 15s \
+            cargo test -p vmm --features kvm --lib migration::transport::sender_cleanup_tests:: -- --nocapture
+          cargo test -p vmm --features kvm --lib migration::transport::tests:: -- --nocapture
+          cargo check -p vmm --features kvm
+          cargo clippy -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Commit one clean source change
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add vmm/src/migration/transport.rs
+          git commit --signoff \
+            -m 'vmm: Close migration work channel during cleanup' \
+            -m 'Close the bounded work channel during cleanup so worker termination does not depend on queue capacity. Scope the shared receiver guard to recv() so workers release it before processing Gate messages.'
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
+          test "$(git diff --name-only "$BASE_SHA"..HEAD)" = "vmm/src/migration/transport.rs"
+
+      - name: Publish clean review branch
+        run: |
+          set -euo pipefail
+          git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
