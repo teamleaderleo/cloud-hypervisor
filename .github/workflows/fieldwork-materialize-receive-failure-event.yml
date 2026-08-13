@@ -1,0 +1,65 @@
+name: Fieldwork migration failure-event candidate materialization
+
+on:
+  push:
+    branches:
+      - materialize/migration-receive-failure-event
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out materializer
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore exact source and apply candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp fieldwork_materialize_receive_failure_event.py /tmp/materialize.py
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          test "$(git rev-parse HEAD)" = 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          python3 /tmp/materialize.py
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = 'vmm/src/lib.rs'
+
+      - name: Enable hosted KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+
+      - name: Run focused and source validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p vmm --features kvm test_receive_request_eof_emits_failure_event -- --nocapture
+          cargo check -p vmm --features kvm
+          cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('vmm/src/lib.rs').read_text()
+          owner = 'event!("vm", "migration-receive-failed");'
+          assert text.count(owner) == 1, text.count(owner)
+          assert 'let receive_result: result::Result<(), MigratableError>' in text
+          PY
+
+      - name: Publish clean candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Leo Li'
+          git config user.email 'cheerleaderleo@outlook.com'
+          git add vmm/src/lib.rs
+          git commit -m 'vmm: own migration receive failure events centrally' -m 'Emit migration-receive-failed from one terminal owner around the receive attempt so accept, request-read, response-write, and explicit protocol-abort errors cannot bypass the failure event after the receiver is ready.' -m 'Add a regression that connects to the real Unix migration listener, closes before the first request, and checks the real event-monitor stream.' -m 'Assisted-by: ChatGPT:GPT-5.6 Sol' -m 'Signed-off-by: Leo Li <cheerleaderleo@outlook.com>'
+          git push origin HEAD:refs/heads/candidate/migration-receive-failure-event --force
