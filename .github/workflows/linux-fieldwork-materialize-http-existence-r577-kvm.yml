@@ -1,0 +1,66 @@
+name: Linux Fieldwork validate lifecycle existence on KVM
+
+on:
+  push:
+    branches: [linux-fieldwork/materialize-http-existence-r577-exact]
+    paths: [.github/workflows/linux-fieldwork-materialize-http-existence-r577-kvm.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: garm-jammy-16
+    timeout-minutes: 35
+    env:
+      BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      EVIDENCE_BRANCH: linux-fieldwork/http-existence-probe-1af93ac
+      EVIDENCE_HEAD: 3e108d7a6494a6e4599202e1d705d2a2164eeee4
+      TARGET_BRANCH: linux-fieldwork/review-http-existence-r577
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify KVM and fetch proven patches
+        run: |
+          set -euo pipefail
+          test -e /dev/kvm
+          ls -l /dev/kvm
+          git reset --hard "$BASE_SHA"
+          git fetch --no-tags origin "$EVIDENCE_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$EVIDENCE_HEAD"
+          git show "FETCH_HEAD:scripts/fieldwork-http-existence.patch" > /tmp/existence.patch
+          git show "FETCH_HEAD:scripts/fieldwork-http-existence-tests.patch" > /tmp/existence-tests.patch
+          test "$(git hash-object /tmp/existence.patch)" = efe584110b515a1b5af27e703c453b8619f5181a
+          test "$(git hash-object /tmp/existence-tests.patch)" = b3f1dbe979115b3420e125a71f4c8353970a16ac
+      - name: Apply exact proven candidate
+        run: |
+          set -euo pipefail
+          git apply --check /tmp/existence.patch
+          git apply /tmp/existence.patch
+          git apply --check /tmp/existence-tests.patch
+          git apply /tmp/existence-tests.patch
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/lib.rs"
+      - name: Prove bare-VMM identity
+        run: cargo test --locked -p vmm --features kvm --lib test_bare_vmm_lifecycle_reports_not_created -- --nocapture
+      - name: Prove configured-unbooted identity
+        run: cargo test --locked -p vmm --features kvm --lib test_created_unbooted_vmm_lifecycle_reports_not_running -- --nocapture
+      - name: Quality gates
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Publish clean source candidate
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add vmm/src/lib.rs
+          git commit --signoff -m 'vmm: Distinguish absent VM from unbooted VM' -m 'Return VmNotCreated for pause, resume, shutdown and power-button when no VM configuration exists, while preserving VmNotRunning for a configured but unbooted VM. The existing HTTP mapping then returns 404 only for the genuinely absent case.'
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
+          test "$(git diff --name-only "$BASE_SHA"..HEAD)" = "vmm/src/lib.rs"
+          git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
