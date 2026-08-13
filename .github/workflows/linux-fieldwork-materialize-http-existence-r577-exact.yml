@@ -42,11 +42,33 @@ jobs:
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "vmm/src/lib.rs"
-      - name: Validate exact lifecycle identities
+      - name: Run bare-VMM lifecycle control
+        run: |
+          set +e
+          cargo test --locked -p vmm --features kvm --lib test_bare_vmm_lifecycle_reports_not_created -- --nocapture > /tmp/bare.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/bare.log
+          if [ "$rc" -ne 0 ]; then
+            msg=$(tail -n 24 /tmp/bare.log | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error title=Bare lifecycle control::$msg"
+            exit "$rc"
+          fi
+      - name: Run configured-unbooted lifecycle control
+        run: |
+          set +e
+          cargo test --locked -p vmm --features kvm --lib test_created_unbooted_vmm_lifecycle_reports_not_running -- --nocapture > /tmp/unbooted.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/unbooted.log
+          if [ "$rc" -ne 0 ]; then
+            msg=$(tail -n 24 /tmp/unbooted.log | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error title=Unbooted lifecycle control::$msg"
+            exit "$rc"
+          fi
+      - name: Run lifecycle quality gates
         run: |
           set -euo pipefail
-          cargo test --locked -p vmm --features kvm --lib test_bare_vmm_lifecycle_reports_not_created -- --nocapture
-          cargo test --locked -p vmm --features kvm --lib test_created_unbooted_vmm_lifecycle_reports_not_running -- --nocapture
           cargo clippy --locked -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations
           cargo fmt --all -- --check
           git diff --check
