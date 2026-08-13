@@ -1,0 +1,112 @@
+name: Linux Fieldwork compose AArch64 PPTT sharing series
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-aarch64-pptt-sharing-series
+
+permissions:
+  contents: write
+
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply PPTT sharing policy as commit 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 31df73cb48ca763be6e30743ec9b314191d585f3
+          test "$(git rev-parse HEAD:vmm/src/cpu.rs)" = "d7c0ae93260515dd5e66b62842fa87d0632da1f2"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("vmm/src/cpu.rs")
+          s = p.read_text()
+
+          anchor = '    #[cfg(target_arch = "aarch64")]\n    pub fn create_pptt(&self) -> Result<PPTT> {'
+          helper = '    #[cfg(target_arch = "aarch64")]\n    fn pptt_cache_exposure(l2_cache_shared: bool, l3_cache_shared: bool) -> (bool, bool) {\n        let expose_l2 = !l2_cache_shared;\n        let expose_l3 = expose_l2 && l3_cache_shared;\n        (expose_l2, expose_l3)\n    }\n\n' + anchor
+          if s.count(anchor) != 1:
+              raise SystemExit("create_pptt anchor drifted")
+          s = s.replace(anchor, helper, 1)
+
+          old = '            l3_cache_line_size,\n            l3_cache_sets,\n            ..\n        } = cache_info.unwrap_or_default();'
+          new = '            l3_cache_line_size,\n            l3_cache_sets,\n            l2_cache_shared,\n            l3_cache_shared,\n            ..\n        } = cache_info.unwrap_or_default();'
+          if s.count(old) != 1:
+              raise SystemExit("cache destructuring anchor drifted")
+          s = s.replace(old, new, 1)
+
+          old = '        let mut pptt = PPTT::new(*b"CLOUDH", *b"CHPPTT  ", 1);\n\n        let l3_cache_handle = if l3_cache_size != 0 {'
+          new = '        let mut pptt = PPTT::new(*b"CLOUDH", *b"CHPPTT  ", 1);\n\n        let (expose_l2, expose_l3) = Self::pptt_cache_exposure(l2_cache_shared, l3_cache_shared);\n\n        let l3_cache_handle = if l3_cache_size != 0 && expose_l3 {'
+          if s.count(old) != 1:
+              raise SystemExit("L3 exposure anchor drifted")
+          s = s.replace(old, new, 1)
+
+          old = '        let l2_cache_handle = if l2_cache_size != 0 {'
+          new = '        let l2_cache_handle = if l2_cache_size != 0 && expose_l2 {'
+          if s.count(old) != 1:
+              raise SystemExit("L2 exposure anchor drifted")
+          s = s.replace(old, new, 1)
+
+          tests = "\n".join([
+              "",
+              "#[cfg(all(test, target_arch = \"aarch64\"))]",
+              "mod pptt_cache_exposure_tests {",
+              "    use super::CpuManager;",
+              "",
+              "    #[test]",
+              "    fn private_l2_shared_l3_is_representable() {",
+              "        assert_eq!(CpuManager::pptt_cache_exposure(false, true), (true, true));",
+              "    }",
+              "",
+              "    #[test]",
+              "    fn shared_l2_omits_l2_and_l3() {",
+              "        assert_eq!(CpuManager::pptt_cache_exposure(true, true), (false, false));",
+              "    }",
+              "",
+              "    #[test]",
+              "    fn private_l3_is_not_exposed_at_package_level() {",
+              "        assert_eq!(CpuManager::pptt_cache_exposure(false, false), (true, false));",
+              "    }",
+              "}",
+              "",
+          ])
+          p.write_text(s + tests)
+          PY
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/cpu.rs"
+
+      - name: Validate composed AArch64 series
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'
+          cargo test --locked -p vmm --target aarch64-unknown-linux-gnu --features kvm pptt_cache_exposure_tests
+          cargo test --locked -p arch --target aarch64-unknown-linux-gnu --features kvm aarch64::cache::tests
+          cargo check --locked -p vmm --target aarch64-unknown-linux-gnu --features kvm
+          cargo check --locked -p vmm --target aarch64-unknown-linux-gnu --features mshv
+
+      - name: Cross-check x86 and publish commit 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p vmm --features kvm --lib -- -D warnings
+          cargo fmt --all -- --check
+          git diff --check
+
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add vmm/src/cpu.rs
+          git commit -s -m 'aarch64: align PPTT cache exposure with sharing model' -m 'PPTT should expose only cache relationships the guest hierarchy can represent. Omit a host-shared L2 from the per-vCPU path, and expose package-level L3 only when the L2 chain remains representable and the host L3 is shared.'
+          test "$(git rev-parse HEAD^)" = "31df73cb48ca763be6e30743ec9b314191d585f3"
+          test "$(git diff --name-only 31df73cb48ca763be6e30743ec9b314191d585f3..HEAD)" = "vmm/src/cpu.rs"
+          git push origin +HEAD:refs/heads/linux-fieldwork/aarch64-pptt-sharing-current-series
