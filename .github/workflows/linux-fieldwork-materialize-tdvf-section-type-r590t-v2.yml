@@ -72,12 +72,20 @@ jobs:
           rustup component add --toolchain 1.89.0 rustfmt clippy
           rustup override set 1.89.0
 
-      - name: Validate focused and broad TDVF gates
+      - name: List and prove TDVF focused tests
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p arch --features tdx,kvm --lib tdvf_unknown_section_type_is_rejected -- --exact --nocapture
-          cargo test --locked -p arch --features tdx,kvm --lib tdvf_known_and_reserved_section_types_are_validated -- --exact --nocapture
+          cargo test --locked -p arch --features tdx,kvm --lib -- --list | tee /tmp/tdvf-tests.txt
+          grep -F 'x86_64::tdx::unit_tests::tdvf_unknown_section_type_is_rejected: test' /tmp/tdvf-tests.txt
+          grep -F 'x86_64::tdx::unit_tests::tdvf_known_and_reserved_section_types_are_validated: test' /tmp/tdvf-tests.txt
+          cargo test --locked -p arch --features tdx,kvm --lib tdvf_unknown_section_type_is_rejected -- --nocapture
+          cargo test --locked -p arch --features tdx,kvm --lib tdvf_known_and_reserved_section_types_are_validated -- --nocapture
+
+      - name: Run broad TDVF gates
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked -p arch --features tdx,kvm --lib
           cargo test --locked -p hypervisor --features tdx,kvm --lib
           cargo clippy --locked -p arch --features tdx,kvm --all-targets -- -D warnings
