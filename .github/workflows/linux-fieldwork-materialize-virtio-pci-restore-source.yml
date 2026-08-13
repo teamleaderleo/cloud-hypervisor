@@ -20,8 +20,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
           test "$(git rev-parse 1af93ac7035cda77cd87b0c18b1134ebb0928052:virtio-devices/src/transport/pci_device.rs)" = "0c1593f53f624c0e23845c3b08339f6ab57e6355"
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
           cat > /tmp/candidate.patch <<'PATCH'
           diff --git a/virtio-devices/src/transport/pci_device.rs b/virtio-devices/src/transport/pci_device.rs
           --- a/virtio-devices/src/transport/pci_device.rs
@@ -145,7 +145,6 @@ jobs:
           +    }
            }
           PATCH
-          sed -i 's/^          //' /tmp/candidate.patch
           git apply --check /tmp/candidate.patch
           git apply /tmp/candidate.patch
           git diff --check
@@ -170,11 +169,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git checkout -B linux-fieldwork/virtio-pci-restore-source 1af93ac7035cda77cd87b0c18b1134ebb0928052
-          git apply /tmp/candidate.patch
           git config user.name Leo
           git config user.email cheerleaderleo@outlook.com
           git add virtio-devices/src/transport/pci_device.rs
           git commit -s -m 'virtio-pci: skip ring index restore for unready queues' -m 'Restored queues may be inactive even when another queue on the same device is ready. Reading the used ring for an unready queue can therefore address guest memory that was never configured. Restore ring progress only for ready queues and reuse the single fallible used-index read for both counters.'
+          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
           test "$(git diff --name-only 1af93ac7035cda77cd87b0c18b1134ebb0928052..HEAD)" = "virtio-devices/src/transport/pci_device.rs"
           git push origin +HEAD:refs/heads/linux-fieldwork/virtio-pci-restore-source
