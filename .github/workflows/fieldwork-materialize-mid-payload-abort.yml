@@ -1,0 +1,51 @@
+name: Fieldwork migration payload-abort candidate materialization
+
+on:
+  push:
+    branches:
+      - materialize/migration-mid-payload-abort
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out materializer
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore exact source and apply candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp fieldwork_materialize_mid_payload_abort.py /tmp/materialize.py
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          test "$(git rev-parse HEAD)" = 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          python3 /tmp/materialize.py
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = 'vmm/src/migration/transport.rs'
+
+      - name: Run focused and transport validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p vmm --features kvm test_memory_worker_abort_interrupts_stalled_payload -- --nocapture
+          cargo test -p vmm --features kvm test_tcp_address_to_server_name -- --nocapture
+          cargo check -p vmm --features kvm
+          cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
+
+      - name: Publish clean candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Leo Li'
+          git config user.email 'cheerleaderleo@outlook.com'
+          git add vmm/src/migration/transport.rs
+          git commit -m 'vmm: make memory receive cleanup interruptible' -m 'Allow auxiliary receive workers to observe the existing cleanup event while a memory payload is only partially available. Poll the socket and kill event before each partial payload read so explicit local teardown does not wait indefinitely on an open but stalled peer.' -m 'Add a regression that drives the real memory worker with a valid range table, a partial payload, and an explicit cleanup event.' -m 'Assisted-by: ChatGPT:GPT-5.6 Sol' -m 'Signed-off-by: Leo Li <cheerleaderleo@outlook.com>'
+          git push origin HEAD:refs/heads/candidate/migration-mid-payload-abort --force
