@@ -18,8 +18,6 @@ jobs:
     env:
       BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
       CLEANUP_HEAD: d00772228614a84111d8da4f0fa30f9145d84954
-      GATE_HEAD: a90f82c4d313ab2fdfad2b25293ad93e2f30ffb6
-      GATE_BRANCH: linux-fieldwork/review-migration-gate-r603
       TARGET_BRANCH: linux-fieldwork/review-migration-gate-r603
     steps:
       - name: Check out controlled fork
@@ -27,19 +25,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build exact two-commit stack
+      - name: Reset to repaired cleanup commit
         run: |
           set -euo pipefail
           git config user.name Leo
           git config user.email cheerleaderleo@outlook.com
           git reset --hard "$CLEANUP_HEAD"
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
-          git fetch --no-tags origin "$GATE_BRANCH"
-          test "$(git rev-parse FETCH_HEAD)" = "$GATE_HEAD"
-          git cherry-pick FETCH_HEAD
-          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
 
-      - name: Align Gate regression with channel-close teardown
+      - name: Reconstruct Gate enqueue commit on repaired base
         shell: bash
         run: |
           set -euo pipefail
@@ -48,32 +43,145 @@ jobs:
           p = Path('vmm/src/migration/transport.rs')
           s = p.read_text()
 
-          old_name = 'mod sender_gate_review_tests {'
-          new_name = 'mod sender_gate_tests {'
-          if s.count(old_name) != 1:
-              raise SystemExit(f'unexpected Gate test-module count: {s.count(old_name)}')
-          s = s.replace(old_name, new_name, 1)
+          old_gate = '''        for _ in 0..self.threads.len() {
+              self.message_tx
+                  .send(SendMemoryThreadMessage::Gate(gate.clone()))
+                  .context("Error sending gate message to workers")
+                  .map_err(MigratableError::MigrateSend)?;
+          }
+          '''
+          new_gate = '''        for _ in 0..self.threads.len() {
+              let mut gate_message = SendMemoryThreadMessage::Gate(gate.clone());
+              loop {
+                  if self.worker_error.load(Ordering::Relaxed) {
+                      gate.open();
+                      return self.cleanup();
+                  }
 
-          old_terminal = '''            match message_rx.recv().unwrap() {
-                SendMemoryThreadMessage::Disconnect => Ok(()),
-                _ => panic!("expected Disconnect after Gate"),
+                  match self.message_tx.try_send(gate_message) {
+                      Ok(()) => break,
+                      Err(TrySendError::Full(unsent_message)) => {
+                          thread::sleep(Duration::from_millis(10));
+                          gate_message = unsent_message;
+                      }
+                      Err(TrySendError::Disconnected(_)) => {
+                          gate.open();
+                          return Err(self.cleanup().err().unwrap_or(
+                              MigratableError::MigrateSend(anyhow!(
+                                  "All sending threads disconnected, but none returned an error?"
+                              )),
+                          ));
+                      }
+                  }
+              }
+          }
+          '''
+          if s.count(old_gate) != 1:
+              raise SystemExit(f'unexpected Gate enqueue owner count: {s.count(old_gate)}')
+          s = s.replace(old_gate, new_gate, 1)
+
+          anchor = '#[cfg(test)]\nmod tests {'
+          if s.count(anchor) != 1:
+              raise SystemExit(f'unexpected transport test anchor count: {s.count(anchor)}')
+          gate_tests = r'''#[cfg(test)]
+mod sender_gate_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::{channel, sync_channel};
+    use std::thread;
+    use std::time::Duration;
+
+    use anyhow::anyhow;
+    use vm_migration::MigratableError;
+    use vm_migration::protocol::MemoryRangeTable;
+
+    use super::{
+        GuestAddress, GuestMemoryAtomic, GuestMemoryMmap, SendAdditionalConnections,
+        SendMemoryThreadMessage, SendMemoryThreadNotify,
+    };
+
+    fn guest_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
+        GuestMemoryAtomic::new(
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap(),
+        )
+    }
+
+    #[test]
+    fn full_queue_healthy_worker_completes() {
+        let (message_tx, message_rx) = sync_channel(1);
+        message_tx
+            .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
+            .unwrap();
+        let (notify_tx, notify_rx) = channel();
+        let worker = thread::spawn(move || -> Result<(), MigratableError> {
+            thread::sleep(Duration::from_millis(20));
+            assert!(matches!(
+                message_rx.recv().unwrap(),
+                SendMemoryThreadMessage::Memory(_)
+            ));
+            match message_rx.recv().unwrap() {
+                SendMemoryThreadMessage::Gate(gate) => {
+                    notify_tx.send(SendMemoryThreadNotify::Gate).unwrap();
+                    gate.wait();
+                }
+                _ => panic!("expected Gate after queued Memory"),
             }
-          '''
-          new_terminal = '''            message_rx.recv().unwrap_err();
+            message_rx.recv().unwrap_err();
             Ok(())
-          '''
-          if s.count(old_terminal) != 1:
-              raise SystemExit(f'unexpected Gate terminal-control count: {s.count(old_terminal)}')
-          s = s.replace(old_terminal, new_terminal, 1)
+        });
+
+        let mut connections = SendAdditionalConnections {
+            guest_memory: guest_memory(),
+            threads: vec![worker],
+            message_tx,
+            worker_error: Arc::new(AtomicBool::new(false)),
+            notify_rx,
+        };
+
+        connections.wait_for_pending_data().unwrap();
+        connections.cleanup().unwrap();
+    }
+
+    #[test]
+    fn worker_error_does_not_block_gate_enqueue() {
+        let (message_tx, message_rx) = sync_channel(1);
+        message_tx
+            .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
+            .unwrap();
+        let (_notify_tx, notify_rx) = channel();
+        let worker_error = Arc::new(AtomicBool::new(true));
+        let worker = thread::spawn(|| -> Result<(), MigratableError> {
+            Err(MigratableError::MigrateSend(anyhow!(
+                "injected worker failure"
+            )))
+        });
+
+        let mut connections = SendAdditionalConnections {
+            guest_memory: guest_memory(),
+            threads: vec![worker],
+            message_tx,
+            worker_error,
+            notify_rx,
+        };
+
+        let _message_rx = message_rx;
+        let err = connections.wait_for_pending_data().unwrap_err();
+        assert!(matches!(err, MigratableError::MigrateSend(_)));
+    }
+}
+
+'''
+          s = s.replace(anchor, gate_tests + anchor, 1)
           p.write_text(s)
           PY
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "vmm/src/migration/transport.rs"
           git add vmm/src/migration/transport.rs
-          git commit --amend --no-edit
+          git commit --signoff \
+            -m 'vmm: Keep migration Gate enqueue cancellation-aware' \
+            -m 'Use nonblocking bounded-queue progress for Gate publication so worker failure cannot strand the main migration thread before cleanup. Add full-queue failure and healthy-progress regressions.'
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
-          git log -1 --format=%B | grep -F 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
 
       - name: Pin toolchain
         run: |
@@ -106,4 +214,5 @@ jobs:
           set -euo pipefail
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
           test "$(git diff --name-only "$CLEANUP_HEAD"..HEAD)" = "vmm/src/migration/transport.rs"
+          git log -2 --format=%B | grep -F 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
           git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
