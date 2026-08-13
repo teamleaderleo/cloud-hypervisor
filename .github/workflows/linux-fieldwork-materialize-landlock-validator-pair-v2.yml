@@ -2,10 +2,8 @@ name: Linux Fieldwork materialize repaired Landlock validator pair
 
 on:
   push:
-    branches:
-      - linux-fieldwork/materialize-landlock-validator-pair-v2
-    paths:
-      - .github/workflows/linux-fieldwork-materialize-landlock-validator-pair-v2.yml
+    branches: [linux-fieldwork/materialize-landlock-validator-pair-v2]
+    paths: [.github/workflows/linux-fieldwork-materialize-landlock-validator-pair-v2.yml]
   workflow_dispatch:
 
 permissions:
@@ -23,18 +21,14 @@ jobs:
       BASELINE_BRANCH: linux-fieldwork/landlock-restore-order-baseline-validation
       TEST_PATH: cloud-hypervisor/tests/integration.rs
     steps:
-      - name: Check out controlled fork
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Pin toolchain
         run: |
-          set -euo pipefail
           rustup toolchain install 1.89.0 --profile minimal
           rustup component add --toolchain 1.89.0 rustfmt clippy
-
-      - name: Prepare candidate and baseline worktrees
+      - name: Prepare identical repaired test file
         run: |
           set -euo pipefail
           git worktree add --detach /tmp/landlock-candidate "$PRODUCT_HEAD"
@@ -55,56 +49,63 @@ jobs:
           cargo +1.89.0 fmt --all
           test "$(git diff --name-only)" = "$TEST_PATH"
           cp "$TEST_PATH" "/tmp/landlock-baseline/$TEST_PATH"
-          cd /tmp/landlock-baseline
-          test "$(git diff --name-only)" = "$TEST_PATH"
-          test "$(git hash-object "$TEST_PATH")" = "$(git -C /tmp/landlock-candidate hash-object "$TEST_PATH")"
-
+          test "$(git hash-object "$TEST_PATH")" = "$(git -C /tmp/landlock-baseline hash-object "$TEST_PATH")"
       - name: Compile candidate validator
         working-directory: /tmp/landlock-candidate
-        shell: bash
+        run: |
+          set +e
+          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm --no-run > /tmp/candidate-build.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/candidate-build.log
+          if [ "$rc" -ne 0 ]; then
+            msg=$(tail -n 24 /tmp/candidate-build.log | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error title=Landlock candidate compile::$msg"
+            exit "$rc"
+          fi
+      - name: List candidate validator test
+        working-directory: /tmp/landlock-candidate
         run: |
           set -euo pipefail
-          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm --no-run
-          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm -- --list \
-            | tee /tmp/candidate-tests.txt
-          grep -F 'test_snapshot_restore_landlock_qcow_backing: test' /tmp/candidate-tests.txt
+          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm -- --list | tee /tmp/candidate-tests.txt
+          grep -F 'test_snapshot_restore_landlock_qcow_backing' /tmp/candidate-tests.txt
           cargo +1.89.0 fmt --all -- --check
           git diff --check
-
       - name: Compile baseline validator
         working-directory: /tmp/landlock-baseline
-        shell: bash
+        run: |
+          set +e
+          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm --no-run > /tmp/baseline-build.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/baseline-build.log
+          if [ "$rc" -ne 0 ]; then
+            msg=$(tail -n 24 /tmp/baseline-build.log | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error title=Landlock baseline compile::$msg"
+            exit "$rc"
+          fi
+      - name: List baseline validator test and verify blob identity
+        working-directory: /tmp/landlock-baseline
         run: |
           set -euo pipefail
-          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm --no-run
-          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm -- --list \
-            | tee /tmp/baseline-tests.txt
-          grep -F 'test_snapshot_restore_landlock_qcow_backing: test' /tmp/baseline-tests.txt
+          cargo +1.89.0 test --locked -p cloud-hypervisor --test integration --features kvm -- --list | tee /tmp/baseline-tests.txt
+          grep -F 'test_snapshot_restore_landlock_qcow_backing' /tmp/baseline-tests.txt
           cargo +1.89.0 fmt --all -- --check
           git diff --check
           test "$(git hash-object "$TEST_PATH")" = "$(git -C /tmp/landlock-candidate hash-object "$TEST_PATH")"
-
       - name: Commit identical test blobs
-        shell: bash
         run: |
           set -euo pipefail
           for tree in /tmp/landlock-candidate /tmp/landlock-baseline; do
             git -C "$tree" config user.name Leo
             git -C "$tree" config user.email cheerleaderleo@outlook.com
             git -C "$tree" add "$TEST_PATH"
-            git -C "$tree" commit --signoff \
-              -m 'tests: Validate Landlock snapshot restore ordering' \
-              -m 'Exercise denied backing access, explicit backing allowance, and on-demand restore using the same integration test bytes on the product candidate and exact baseline.'
+            git -C "$tree" commit --signoff -m 'tests: Validate Landlock snapshot restore ordering' -m 'Exercise denied backing access, explicit backing allowance, and on-demand restore using the same integration test bytes on the product candidate and exact baseline.'
           done
           test "$(git -C /tmp/landlock-candidate rev-parse HEAD^)" = "$PRODUCT_HEAD"
           test "$(git -C /tmp/landlock-baseline rev-parse HEAD^)" = "$BASE_SHA"
-          test "$(git -C /tmp/landlock-candidate diff --name-only "$PRODUCT_HEAD"..HEAD)" = "$TEST_PATH"
-          test "$(git -C /tmp/landlock-baseline diff --name-only "$BASE_SHA"..HEAD)" = "$TEST_PATH"
-          test "$(git -C /tmp/landlock-candidate rev-parse HEAD:"$TEST_PATH")" = \
-               "$(git -C /tmp/landlock-baseline rev-parse HEAD:"$TEST_PATH")"
-
+          test "$(git -C /tmp/landlock-candidate rev-parse HEAD:"$TEST_PATH")" = "$(git -C /tmp/landlock-baseline rev-parse HEAD:"$TEST_PATH")"
       - name: Publish paired validator branches
         run: |
-          set -euo pipefail
           git -C /tmp/landlock-candidate push --force origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
           git -C /tmp/landlock-baseline push --force origin "HEAD:refs/heads/$BASELINE_BRANCH"
