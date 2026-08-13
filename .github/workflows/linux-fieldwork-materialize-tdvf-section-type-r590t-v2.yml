@@ -41,35 +41,23 @@ jobs:
           p = Path('arch/src/x86_64/tdx/mod.rs')
           s = p.read_text()
 
-          old_len = '''    if descriptor.length as usize
-              != size_of::<TdvfDescriptor>() + size_of::<TdvfSection>() * descriptor.num_sections as usize
-          {
-          '''
-          new_len = '''    if descriptor.length as usize
-              != size_of::<TdvfDescriptor>()
-                  + size_of::<RawTdvfSection>() * descriptor.num_sections as usize
-          {
-          '''
-          if s.count(old_len) != 1:
-              raise SystemExit(f'unexpected descriptor length check count: {s.count(old_len)}')
-          s = s.replace(old_len, new_len, 1)
+          old_wire_size = 'size_of::<TdvfSection>() * descriptor.num_sections as usize'
+          new_wire_size = 'size_of::<RawTdvfSection>() * descriptor.num_sections as usize'
+          if s.count(old_wire_size) != 1:
+              raise SystemExit(f'unexpected wire-size owner count: {s.count(old_wire_size)}')
+          s = s.replace(old_wire_size, new_wire_size, 1)
 
-          old_size_assert = '        assert_eq!(size_of::<RawTdvfSection>(), size_of::<TdvfSection>());\n'
-          new_size_assert = '        assert_eq!(size_of::<RawTdvfSection>(), 32);\n'
+          old_size_assert = 'assert_eq!(size_of::<RawTdvfSection>(), size_of::<TdvfSection>());'
+          new_size_assert = 'assert_eq!(size_of::<RawTdvfSection>(), 32);'
           if s.count(old_size_assert) != 1:
-              raise SystemExit('unexpected raw/typed size assertion count')
+              raise SystemExit(f'unexpected raw/typed size assertion count: {s.count(old_size_assert)}')
           s = s.replace(old_size_assert, new_size_assert, 1)
 
-          old_control = '''            let section_type = sections[0].r#type;
-              println!("TDVF_TYPE_CANDIDATE control raw_type={raw_type:#x} type={section_type:?}");
-          '''
-          new_control = '''            let section_type = sections[0].r#type;
-              println!("TDVF_TYPE_CANDIDATE control raw_type={raw_type:#x} type={section_type:?}");
-              assert_eq!(section_type as u32, raw_type);
-          '''
-          if s.count(old_control) != 1:
-              raise SystemExit('unexpected represented-type control count')
-          s = s.replace(old_control, new_control, 1)
+          print_line = '            println!("TDVF_TYPE_CANDIDATE control raw_type={raw_type:#x} type={section_type:?}");'
+          replacement = print_line + '\n            assert_eq!(section_type as u32, raw_type);'
+          if s.count(print_line) != 1:
+              raise SystemExit(f'unexpected represented-type control print count: {s.count(print_line)}')
+          s = s.replace(print_line, replacement, 1)
           p.write_text(s)
           PY
           cargo fmt --all
