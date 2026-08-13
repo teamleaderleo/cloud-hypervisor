@@ -17,31 +17,91 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply reviewed current-main model relocation
+      - name: Rebuild reviewed model relocation on current main
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags origin linux-fieldwork/smbios-model-probe-1af93ac
-          test "$(git rev-parse FETCH_HEAD)" = "9f09e6701780a9b308791b43ea2d46ed33beae8c"
-          git show FETCH_HEAD:scripts/fieldwork-smbios-model.patch > /tmp/model.patch
-          test "$(git hash-object /tmp/model.patch)" = "2b00e4444b72153306b45d74e4d5fefadca6a91a"
-
           git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
-          git apply --check /tmp/model.patch
-          git apply /tmp/model.patch
+          cat > arch/src/smbios.rs <<'RS'
+          // Copyright © 2026 Contributors to the Cloud Hypervisor project
+          //
+          // SPDX-License-Identifier: Apache-2.0
 
-          sed -i 's/pub(crate) const DEFAULT_SYSTEM_MANUFACTURER/pub const DEFAULT_SYSTEM_MANUFACTURER/' arch/src/smbios.rs
-          sed -i 's/pub(crate) const DEFAULT_SYSTEM_PRODUCT_NAME/pub const DEFAULT_SYSTEM_PRODUCT_NAME/' arch/src/smbios.rs
+          pub const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
+          pub const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
+
+          #[derive(Clone, Debug, Default, PartialEq, Eq)]
+          pub struct SmbiosConfig {
+              pub system: Option<SmbiosSystem>,
+              pub chassis: Option<SmbiosChassisConfig>,
+              pub oem_strings: Box<[String]>,
+          }
+
+          #[derive(Clone, Debug, Default, PartialEq, Eq)]
+          pub struct SmbiosSystem {
+              pub manufacturer: Option<String>,
+              pub product_name: Option<String>,
+              pub version: Option<String>,
+              pub serial_number: Option<String>,
+              pub uuid: Option<String>,
+              pub sku_number: Option<String>,
+              pub family: Option<String>,
+          }
+
+          #[derive(Clone, Debug, Default, PartialEq, Eq)]
+          pub struct SmbiosChassisConfig {
+              pub asset_tag: Option<String>,
+          }
+
+          impl SmbiosConfig {
+              pub fn is_empty(&self) -> bool {
+                  *self == Self::default()
+              }
+          }
+          RS
+
           python3 - <<'PY'
           from pathlib import Path
+
+          p = Path("arch/src/lib.rs")
+          s = p.read_text()
+          anchor = "type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;\n"
+          if s.count(anchor) != 1:
+              raise SystemExit("arch lib insertion anchor drifted")
+          p.write_text(s.replace(anchor, anchor + "\npub mod smbios;\n", 1))
+
           p = Path("arch/src/x86_64/smbios.rs")
           s = p.read_text()
-          old = "pub use crate::smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};\nuse crate::smbios::{\n    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME,\n};"
-          new = "pub use crate::smbios::{\n    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME, SmbiosChassisConfig, SmbiosConfig,\n    SmbiosSystem,\n};"
+          import_anchor = "use crate::GuestMemoryMmap;"
+          public_import = "pub use crate::smbios::{\n    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME, SmbiosChassisConfig, SmbiosConfig,\n    SmbiosSystem,\n};\n"
+          if s.count(import_anchor) != 1:
+              raise SystemExit("x86 import anchor drifted")
+          s = s.replace(import_anchor, public_import + import_anchor, 1)
+          start = s.find("pub const DEFAULT_SYSTEM_MANUFACTURER")
+          end = s.find("fn compute_checksum", start)
+          if start < 0 or end < 0:
+              raise SystemExit("x86 model block anchors drifted")
+          s = s[:start] + s[end:]
+          p.write_text(s)
+
+          p = Path("vmm/src/vm_config.rs")
+          s = p.read_text()
+          old = "#[cfg(target_arch = \"x86_64\")]\nimpl PlatformConfig {"
           if s.count(old) != 1:
-              raise SystemExit("x86 SMBIOS compatibility re-export anchor drifted")
-          p.write_text(s.replace(old, new, 1))
+              raise SystemExit("PlatformConfig cfg anchor drifted")
+          s = s.replace(old, "impl PlatformConfig {", 1)
+          replacements = {
+              "arch::x86_64::SmbiosConfig": "arch::smbios::SmbiosConfig",
+              "arch::x86_64::SmbiosSystem": "arch::smbios::SmbiosSystem",
+              "arch::x86_64::SmbiosChassisConfig": "arch::smbios::SmbiosChassisConfig",
+          }
+          for old, new in replacements.items():
+              if old not in s:
+                  raise SystemExit(f"missing vm_config model reference: {old}")
+              s = s.replace(old, new)
+          p.write_text(s)
           PY
+
           cargo fmt --all
           git diff --check
 
