@@ -43,41 +43,26 @@ jobs:
           p = Path("vmm/src/cpu.rs")
           s = p.read_text()
 
-          anchor = '''    #[cfg(target_arch = "aarch64")]
-    #[error("Error initialising GICR base address")]
-    VcpuSetGicrBaseAddr(#[source] hypervisor::HypervisorCpuError),
-'''
-          replacement = anchor + '''
-    #[cfg(target_arch = "aarch64")]
-    #[error("Failed to read cache topology")]
-    CacheTopology(#[source] arch::aarch64::cache::Error),
-'''
+          anchor = "    #[cfg(target_arch = \"aarch64\")]\n    #[error(\"Error initialising GICR base address\")]\n    VcpuSetGicrBaseAddr(#[source] hypervisor::HypervisorCpuError),\n"
+          replacement = anchor + "\n    #[cfg(target_arch = \"aarch64\")]\n    #[error(\"Failed to read cache topology\")]\n    CacheTopology(#[source] arch::aarch64::cache::Error),\n"
           if s.count(anchor) != 1:
               raise SystemExit("cpu error anchor drifted")
           s = s.replace(anchor, replacement, 1)
 
-          old = '''    #[cfg(target_arch = "aarch64")]
-    pub fn create_pptt(&self) -> PPTT {'''
-          new = '''    #[cfg(target_arch = "aarch64")]
-    pub fn create_pptt(&self) -> Result<PPTT> {'''
+          old = "    #[cfg(target_arch = \"aarch64\")]\n    pub fn create_pptt(&self) -> PPTT {"
+          new = "    #[cfg(target_arch = \"aarch64\")]\n    pub fn create_pptt(&self) -> Result<PPTT> {"
           if s.count(old) != 1:
               raise SystemExit("create_pptt signature drifted")
           s = s.replace(old, new, 1)
 
-          old = '        let cache_info = read_cache_topology();'
-          new = '        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;'
+          old = "        let cache_info = read_cache_topology();"
+          new = "        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;"
           if s.count(old) != 1:
               raise SystemExit("cache read anchor drifted")
           s = s.replace(old, new, 1)
 
-          old = '''        pptt
-    }
-
-    #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]'''
-          new = '''        Ok(pptt)
-    }
-
-    #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]'''
+          old = "        pptt\n    }\n\n    #[cfg(all(target_arch = \"x86_64\", feature = \"guest_debug\"))]"
+          new = "        Ok(pptt)\n    }\n\n    #[cfg(all(target_arch = \"x86_64\", feature = \"guest_debug\"))]"
           if s.count(old) != 1:
               raise SystemExit("pptt return anchor drifted")
           s = s.replace(old, new, 1)
