@@ -1,0 +1,109 @@
+name: Linux Fieldwork SMBIOS placement probe current
+
+on:
+  push:
+    branches: [linux-fieldwork/smbios-address-probe-current-v2]
+    paths: [.github/workflows/linux-fieldwork-smbios-address-probe-current-v2.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Reset exact source and inject placement discriminator
+        run: |
+          set -euo pipefail
+          git reset --hard "$BASE_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('arch/src/x86_64/smbios.rs')
+          s = p.read_text()
+          old_sig = 'pub fn setup_smbios(mem: &GuestMemoryMmap, smbios: Option<&SmbiosConfig>) -> Result<u64> {'
+          new_sig = '\n'.join([
+              'pub fn setup_smbios_at(',
+              '    mem: &GuestMemoryMmap,',
+              '    smbios: Option<&SmbiosConfig>,',
+              '    start: u64,',
+              ') -> Result<u64> {',
+          ])
+          if s.count(old_sig) != 1: raise SystemExit('unexpected setup_smbios signature count')
+          s = s.replace(old_sig, new_sig, 1)
+          a = '    let physptr = GuestAddress(SMBIOS_START)'
+          b = '    let physptr = GuestAddress(start)'
+          if s.count(a) != 1: raise SystemExit('unexpected physptr start count')
+          s = s.replace(a, b, 1)
+          a = '        mem.write_obj(smbios_ep, GuestAddress(SMBIOS_START))'
+          b = '        mem.write_obj(smbios_ep, GuestAddress(start))'
+          if s.count(a) != 1: raise SystemExit('unexpected entry-point write count')
+          s = s.replace(a, b, 1)
+          marker = '\n#[cfg(test)]\nmod unit_tests {'
+          wrapper = '\n'.join([
+              '',
+              'pub fn setup_smbios(mem: &GuestMemoryMmap, smbios: Option<&SmbiosConfig>) -> Result<u64> {',
+              '    setup_smbios_at(mem, smbios, SMBIOS_START)',
+              '}',
+              marker,
+          ])
+          if s.count(marker) != 1: raise SystemExit('unexpected unit test module count')
+          s = s.replace(marker, wrapper, 1)
+          use_anchor = 'mod unit_tests {\n    use super::*;'
+          test = r'''mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn smbios_custom_start_preserves_table_payload() {
+        const CUSTOM_START: u64 = SMBIOS_START + 0x20_000;
+        let default_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(SMBIOS_START), 64 << 10)]).unwrap();
+        let custom_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(CUSTOM_START), 64 << 10)]).unwrap();
+        let config = SmbiosConfig {
+            system: Some(SmbiosSystem {
+                manufacturer: Some("fieldwork-maker".to_string()),
+                product_name: Some("fieldwork-product".to_string()),
+                version: Some("v1".to_string()),
+                serial_number: Some("serial".to_string()),
+                uuid: Some("01234567-89ab-cdef-0123-456789abcdef".to_string()),
+                sku_number: Some("sku".to_string()),
+                family: Some("family".to_string()),
+            }),
+            chassis: Some(SmbiosChassisConfig { asset_tag: Some("asset".to_string()) }),
+            oem_strings: vec!["oem-one".to_string(), "oem-two".to_string()].into_boxed_slice(),
+        };
+        let default_len = setup_smbios(&default_mem, Some(&config)).unwrap();
+        let custom_len = setup_smbios_at(&custom_mem, Some(&config), CUSTOM_START).unwrap();
+        assert_eq!(default_len, custom_len);
+        let default_ep: Smbios30Entrypoint = default_mem.read_obj(GuestAddress(SMBIOS_START)).unwrap();
+        let custom_ep: Smbios30Entrypoint = custom_mem.read_obj(GuestAddress(CUSTOM_START)).unwrap();
+        assert_eq!(default_ep.max_size, custom_ep.max_size);
+        assert_eq!(default_ep.physptr, SMBIOS_START + size_of::<Smbios30Entrypoint>() as u64);
+        assert_eq!(custom_ep.physptr, CUSTOM_START + size_of::<Smbios30Entrypoint>() as u64);
+        let table_len = default_ep.max_size as usize;
+        let mut default_payload = vec![0u8; table_len];
+        let mut custom_payload = vec![0u8; table_len];
+        default_mem.read_slice(&mut default_payload, GuestAddress(default_ep.physptr)).unwrap();
+        custom_mem.read_slice(&mut custom_payload, GuestAddress(custom_ep.physptr)).unwrap();
+        assert_eq!(default_payload, custom_payload);
+    }'''
+          if s.count(use_anchor) != 1: raise SystemExit('unexpected unit use anchor count')
+          s = s.replace(use_anchor, test, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/x86_64/smbios.rs"
+      - name: Run placement and existing SMBIOS tests
+        run: |
+          set -euo pipefail
+          cargo test --locked -p arch --features kvm --lib smbios_custom_start_preserves_table_payload -- --nocapture
+          cargo test --locked -p arch --features kvm --lib smbios_ -- --nocapture
+          cargo clippy --locked -p arch --features kvm --all-targets -- -D warnings
+          cargo fmt --all -- --check
+          git diff --check
