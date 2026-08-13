@@ -1,0 +1,101 @@
+name: Linux Fieldwork materialize common SMBIOS model source
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-smbios-common-model-source
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply reviewed current-main model relocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin linux-fieldwork/smbios-model-probe-1af93ac
+          test "$(git rev-parse FETCH_HEAD)" = "9f09e6701780a9b308791b43ea2d46ed33beae8c"
+          git show FETCH_HEAD:scripts/fieldwork-smbios-model.patch > /tmp/model.patch
+          test "$(git hash-object /tmp/model.patch)" = "2b00e4444b72153306b45d74e4d5fefadca6a91a"
+
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          git apply --check /tmp/model.patch
+          git apply /tmp/model.patch
+
+          sed -i 's/pub(crate) const DEFAULT_SYSTEM_MANUFACTURER/pub const DEFAULT_SYSTEM_MANUFACTURER/' arch/src/smbios.rs
+          sed -i 's/pub(crate) const DEFAULT_SYSTEM_PRODUCT_NAME/pub const DEFAULT_SYSTEM_PRODUCT_NAME/' arch/src/smbios.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("arch/src/x86_64/smbios.rs")
+          s = p.read_text()
+          old = "pub use crate::smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};\nuse crate::smbios::{\n    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME,\n};"
+          new = "pub use crate::smbios::{\n    DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME, SmbiosChassisConfig, SmbiosConfig,\n    SmbiosSystem,\n};"
+          if s.count(old) != 1:
+              raise SystemExit("x86 SMBIOS compatibility re-export anchor drifted")
+          p.write_text(s.replace(old, new, 1))
+          PY
+          cargo fmt --all
+          git diff --check
+
+      - name: Prove existing x86 public import path
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p arch/tests
+          cat > arch/tests/fieldwork_smbios_public_api.rs <<'RS'
+          use arch::x86_64::smbios::{
+              DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME, SmbiosChassisConfig,
+              SmbiosConfig, SmbiosSystem,
+          };
+
+          #[test]
+          fn existing_x86_smbios_public_symbols_remain_importable() {
+              assert_eq!(DEFAULT_SYSTEM_MANUFACTURER, "Cloud Hypervisor");
+              assert_eq!(DEFAULT_SYSTEM_PRODUCT_NAME, "cloud-hypervisor");
+              let _ = SmbiosConfig::default();
+              let _ = SmbiosSystem::default();
+              let _ = SmbiosChassisConfig::default();
+          }
+          RS
+          cargo test --locked -p arch --test fieldwork_smbios_public_api --features kvm
+          rm arch/tests/fieldwork_smbios_public_api.rs
+
+      - name: Validate x86 and AArch64 consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p arch --lib smbios --features kvm
+          cargo check --locked -p vmm --features kvm
+          cargo clippy --locked -p arch -p vmm --features kvm -- -D warnings
+
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          cargo check --locked -p arch -p vmm --target aarch64-unknown-linux-gnu --no-default-features --features kvm
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Publish clean source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e arch/tests/fieldwork_smbios_public_api.rs
+          git diff --name-only | sort > /tmp/files
+          printf '%s\n' arch/src/lib.rs arch/src/smbios.rs arch/src/x86_64/smbios.rs vmm/src/vm_config.rs | sort > /tmp/expected
+          cmp /tmp/files /tmp/expected
+
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add arch/src/lib.rs arch/src/smbios.rs arch/src/x86_64/smbios.rs vmm/src/vm_config.rs
+          git commit -s -m 'arch: share SMBIOS configuration model across architectures' -m 'Move the SMBIOS configuration data model into common arch code so platform configuration can construct it on every architecture. Preserve the existing x86 public type and default-string paths through re-exports; table generation and placement remain x86-specific.'
+          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
+          git push origin +HEAD:refs/heads/linux-fieldwork/smbios-common-model-source
