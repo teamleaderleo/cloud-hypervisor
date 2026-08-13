@@ -1,0 +1,107 @@
+name: Linux Fieldwork materialize migration Gate repair stack
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-migration-gate-r603-stack-v2
+    paths:
+      - .github/workflows/linux-fieldwork-materialize-migration-gate-r603-stack-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      CLEANUP_HEAD: d00772228614a84111d8da4f0fa30f9145d84954
+      GATE_HEAD: a90f82c4d313ab2fdfad2b25293ad93e2f30ffb6
+      TARGET_BRANCH: linux-fieldwork/review-migration-gate-r603
+    steps:
+      - name: Check out controlled fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact two-commit stack
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git reset --hard "$CLEANUP_HEAD"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git fetch --no-tags origin "$GATE_HEAD"
+          git cherry-pick "$GATE_HEAD"
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
+
+      - name: Align Gate regression with channel-close teardown
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('vmm/src/migration/transport.rs')
+          s = p.read_text()
+
+          old_name = 'mod sender_gate_review_tests {'
+          new_name = 'mod sender_gate_tests {'
+          if s.count(old_name) != 1:
+              raise SystemExit(f'unexpected Gate test-module count: {s.count(old_name)}')
+          s = s.replace(old_name, new_name, 1)
+
+          old_terminal = '''            match message_rx.recv().unwrap() {
+                SendMemoryThreadMessage::Disconnect => Ok(()),
+                _ => panic!("expected Disconnect after Gate"),
+            }
+          '''
+          new_terminal = '''            message_rx.recv().unwrap_err();
+            Ok(())
+          '''
+          if s.count(old_terminal) != 1:
+              raise SystemExit(f'unexpected Gate terminal-control count: {s.count(old_terminal)}')
+          s = s.replace(old_terminal, new_terminal, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/migration/transport.rs"
+          git add vmm/src/migration/transport.rs
+          git commit --amend --no-edit
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
+          git log -1 --format=%B | grep -F 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
+
+      - name: Pin toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup component add --toolchain 1.89.0 rustfmt clippy
+          rustup override set 1.89.0
+
+      - name: Validate stacked migration sender repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p vmm --features kvm --lib -- --list | tee /tmp/test-list.txt
+          grep -F 'migration::transport::sender_cleanup_tests::cleanup_closes_full_queue_and_joins_worker: test' /tmp/test-list.txt
+          grep -F 'migration::transport::sender_cleanup_tests::workers_release_receiver_before_waiting_at_gate: test' /tmp/test-list.txt
+          grep -F 'migration::transport::sender_gate_tests::full_queue_healthy_worker_completes: test' /tmp/test-list.txt
+          grep -F 'migration::transport::sender_gate_tests::worker_error_does_not_block_gate_enqueue: test' /tmp/test-list.txt
+          timeout --signal=TERM --kill-after=2s 20s \
+            cargo test -p vmm --features kvm --lib migration::transport::sender_cleanup_tests:: -- --nocapture
+          timeout --signal=TERM --kill-after=2s 20s \
+            cargo test -p vmm --features kvm --lib migration::transport::sender_gate_tests:: -- --nocapture
+          cargo test -p vmm --features kvm --lib migration::transport::tests:: -- --nocapture
+          cargo check -p vmm --features kvm
+          cargo clippy -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Verify stack shape and publish
+        run: |
+          set -euo pipefail
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 2
+          test "$(git diff --name-only "$CLEANUP_HEAD"..HEAD)" = "vmm/src/migration/transport.rs"
+          git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
