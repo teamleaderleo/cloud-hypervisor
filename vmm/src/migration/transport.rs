@@ -879,10 +879,29 @@ impl SendAdditionalConnections {
     fn wait_for_pending_data(&mut self) -> Result<(), MigratableError> {
         let gate = Arc::new(Gate::new());
         for _ in 0..self.threads.len() {
-            self.message_tx
-                .send(SendMemoryThreadMessage::Gate(gate.clone()))
-                .context("Error sending gate message to workers")
-                .map_err(MigratableError::MigrateSend)?;
+            let mut gate_message = SendMemoryThreadMessage::Gate(gate.clone());
+            loop {
+                if self.worker_error.load(Ordering::Relaxed) {
+                    gate.open();
+                    return self.cleanup();
+                }
+
+                match self.message_tx.try_send(gate_message) {
+                    Ok(()) => break,
+                    Err(TrySendError::Full(unsent_message)) => {
+                        thread::sleep(Duration::from_millis(10));
+                        gate_message = unsent_message;
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        gate.open();
+                        return Err(self.cleanup().err().unwrap_or(MigratableError::MigrateSend(
+                            anyhow!(
+                                "All sending threads disconnected, but none returned an error?"
+                            ),
+                        )));
+                    }
+                }
+            }
         }
 
         // We cannot simply wait at the gate, otherwise we might miss it when a sender
@@ -914,7 +933,7 @@ impl SendAdditionalConnections {
         }
     }
 
-    /// Closes the work channel and joins all workers.
+    /// Sends disconnect messages to all workers and joins them.
     pub(crate) fn cleanup(&mut self) -> Result<(), MigratableError> {
         // Closing the work channel is independent of bounded-queue capacity. Workers
         // drain already queued work and then receive the terminal disconnect state.
@@ -1401,6 +1420,91 @@ mod sender_cleanup_tests {
             worker.join().unwrap().unwrap();
         }
         drop(peers);
+    }
+}
+
+#[cfg(test)]
+mod sender_gate_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::{channel, sync_channel};
+    use std::thread;
+    use std::time::Duration;
+
+    use anyhow::anyhow;
+    use vm_migration::MigratableError;
+    use vm_migration::protocol::MemoryRangeTable;
+
+    use super::{
+        GuestAddress, GuestMemoryAtomic, GuestMemoryMmap, SendAdditionalConnections,
+        SendMemoryThreadMessage, SendMemoryThreadNotify,
+    };
+
+    fn guest_memory() -> GuestMemoryAtomic<GuestMemoryMmap> {
+        GuestMemoryAtomic::new(GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap())
+    }
+
+    #[test]
+    fn full_queue_healthy_worker_completes() {
+        let (message_tx, message_rx) = sync_channel(1);
+        message_tx
+            .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
+            .unwrap();
+        let (notify_tx, notify_rx) = channel();
+        let worker = thread::spawn(move || -> Result<(), MigratableError> {
+            thread::sleep(Duration::from_millis(20));
+            assert!(matches!(
+                message_rx.recv().unwrap(),
+                SendMemoryThreadMessage::Memory(_)
+            ));
+            match message_rx.recv().unwrap() {
+                SendMemoryThreadMessage::Gate(gate) => {
+                    notify_tx.send(SendMemoryThreadNotify::Gate).unwrap();
+                    gate.wait();
+                }
+                _ => panic!("expected Gate after queued Memory"),
+            }
+            message_rx.recv().unwrap_err();
+            Ok(())
+        });
+
+        let mut connections = SendAdditionalConnections {
+            guest_memory: guest_memory(),
+            threads: vec![worker],
+            message_tx,
+            worker_error: Arc::new(AtomicBool::new(false)),
+            notify_rx,
+        };
+
+        connections.wait_for_pending_data().unwrap();
+        connections.cleanup().unwrap();
+    }
+
+    #[test]
+    fn worker_error_does_not_block_gate_enqueue() {
+        let (message_tx, message_rx) = sync_channel(1);
+        message_tx
+            .send(SendMemoryThreadMessage::Memory(MemoryRangeTable::default()))
+            .unwrap();
+        let (_notify_tx, notify_rx) = channel();
+        let worker_error = Arc::new(AtomicBool::new(true));
+        let worker = thread::spawn(|| -> Result<(), MigratableError> {
+            Err(MigratableError::MigrateSend(anyhow!(
+                "injected worker failure"
+            )))
+        });
+
+        let mut connections = SendAdditionalConnections {
+            guest_memory: guest_memory(),
+            threads: vec![worker],
+            message_tx,
+            worker_error,
+            notify_rx,
+        };
+
+        let _message_rx = message_rx;
+        let err = connections.wait_for_pending_data().unwrap_err();
+        assert!(matches!(err, MigratableError::MigrateSend(_)));
     }
 }
 
