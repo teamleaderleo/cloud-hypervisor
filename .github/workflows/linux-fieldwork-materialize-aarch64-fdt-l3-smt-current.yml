@@ -1,0 +1,92 @@
+name: Linux Fieldwork materialize current AArch64 FDT L3 SMT candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-aarch64-fdt-l3-smt-current
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild current-main semantic candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 1af93ac7035cda77cd87b0c18b1134ebb0928052:arch/src/aarch64/fdt.rs)" = "887d9edfe02056ab2567e4252fb6172236e1f770"
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("arch/src/aarch64/fdt.rs")
+          s = p.read_text()
+          anchor = "// Following are the auxiliary function for creating the different nodes that we append to our FDT.\nfn create_cpu_nodes("
+          helper = """// Following are the auxiliary function for creating the different nodes that we append to our FDT.\nfn l3_package_id(cpu_id: usize, threads_per_core: u16, cores_per_package: u16) -> u32 {\n    let logical_cpus_per_package = u32::from(threads_per_core) * u32::from(cores_per_package);\n    cpu_id as u32 / logical_cpus_per_package\n}\n\nfn create_cpu_nodes("""
+          if s.count(anchor) != 1:
+              raise SystemExit("create_cpu_nodes anchor drifted")
+          s = s.replace(anchor, helper, 1)
+          old = "let package_id: u32 = cpu_id as u32 / cores_per_package as u32;"
+          new = "let package_id = l3_package_id(cpu_id, threads_per_core, cores_per_package);"
+          if s.count(old) != 1:
+              raise SystemExit("L3 package selector drifted")
+          s = s.replace(old, new, 1)
+          s += r'''
+
+#[cfg(test)]
+mod l3_package_id_tests {
+    use super::l3_package_id;
+
+    #[test]
+    fn test_l3_package_id_single_thread_control() {
+        let package_ids: Vec<u32> = (0..4).map(|cpu_id| l3_package_id(cpu_id, 1, 2)).collect();
+        assert_eq!(package_ids, vec![0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn test_l3_package_id_accounts_for_smt_threads() {
+        let package_ids: Vec<u32> = (0..8).map(|cpu_id| l3_package_id(cpu_id, 2, 2)).collect();
+        assert_eq!(package_ids, vec![0, 0, 0, 0, 1, 1, 1, 1]);
+    }
+}
+'''
+          p.write_text(s)
+          PY
+          git diff --check
+          cargo fmt --all -- --check
+
+      - name: Run AArch64 focused tests and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'
+          cargo test --locked -p arch --target aarch64-unknown-linux-gnu --features kvm l3_package_id_tests
+          cargo check --locked -p vmm --target aarch64-unknown-linux-gnu --features kvm
+
+      - name: Cross-check x86 workspace boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p vmm --features kvm
+          cargo clippy --locked -p vmm --features kvm --lib -- -D warnings
+
+      - name: Publish clean source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add arch/src/aarch64/fdt.rs
+          git commit -s -m 'aarch64: account for SMT in FDT L3 package mapping' -m 'Package-shared L3 phandles are selected from logical CPU IDs. Include threads per core in the logical CPUs-per-package divisor so SMT guests do not advance to the next package L3 before all threads in the current package have been emitted.'
+          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
+          test "$(git diff --name-only 1af93ac7035cda77cd87b0c18b1134ebb0928052..HEAD)" = "arch/src/aarch64/fdt.rs"
+          git push origin +HEAD:refs/heads/linux-fieldwork/aarch64-fdt-l3-smt-current-source
