@@ -2,10 +2,8 @@ name: Linux Fieldwork materialize repaired TDVF section type
 
 on:
   push:
-    branches:
-      - linux-fieldwork/materialize-tdvf-section-type-r590t-v2
-    paths:
-      - .github/workflows/linux-fieldwork-materialize-tdvf-section-type-r590t-v2.yml
+    branches: [linux-fieldwork/materialize-tdvf-section-type-r590t-v2]
+    paths: [.github/workflows/linux-fieldwork-materialize-tdvf-section-type-r590t-v2.yml]
   workflow_dispatch:
 
 permissions:
@@ -20,73 +18,61 @@ jobs:
       SOURCE_HEAD: 19fa932e1faa1f05c588813484f1750b9dd41161
       TARGET_BRANCH: linux-fieldwork/review-tdvf-section-type-r590t
     steps:
-      - name: Check out controlled fork
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Reset to reviewed source head
         run: |
           set -euo pipefail
           git reset --hard "$SOURCE_HEAD"
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
-          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
-
       - name: Apply review repairs
-        shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           p = Path('arch/src/x86_64/tdx/mod.rs')
           s = p.read_text()
-
-          old_wire_size = 'size_of::<TdvfSection>() * descriptor.num_sections as usize'
-          new_wire_size = 'size_of::<RawTdvfSection>() * descriptor.num_sections as usize'
-          if s.count(old_wire_size) != 1:
-              raise SystemExit(f'unexpected wire-size owner count: {s.count(old_wire_size)}')
-          s = s.replace(old_wire_size, new_wire_size, 1)
-
-          old_size_assert = 'assert_eq!(size_of::<RawTdvfSection>(), size_of::<TdvfSection>());'
-          new_size_assert = 'assert_eq!(size_of::<RawTdvfSection>(), 32);'
-          if s.count(old_size_assert) != 1:
-              raise SystemExit(f'unexpected raw/typed size assertion count: {s.count(old_size_assert)}')
-          s = s.replace(old_size_assert, new_size_assert, 1)
-
-          print_line = '            println!("TDVF_TYPE_CANDIDATE control raw_type={raw_type:#x} type={section_type:?}");'
-          replacement = print_line + '\n            assert_eq!(section_type as u32, raw_type);'
-          if s.count(print_line) != 1:
-              raise SystemExit(f'unexpected represented-type control print count: {s.count(print_line)}')
-          s = s.replace(print_line, replacement, 1)
-          p.write_text(s)
+          a = 'size_of::<TdvfSection>() * descriptor.num_sections as usize'
+          b = 'size_of::<RawTdvfSection>() * descriptor.num_sections as usize'
+          if s.count(a) != 1: raise SystemExit(f'unexpected wire-size owner count: {s.count(a)}')
+          s = s.replace(a, b, 1)
+          a = 'assert_eq!(size_of::<RawTdvfSection>(), size_of::<TdvfSection>());'
+          b = 'assert_eq!(size_of::<RawTdvfSection>(), 32);'
+          if s.count(a) != 1: raise SystemExit(f'unexpected ABI assertion count: {s.count(a)}')
+          s = s.replace(a, b, 1)
+          a = '            println!("TDVF_TYPE_CANDIDATE control raw_type={raw_type:#x} type={section_type:?}");'
+          b = a + '\n            assert_eq!(section_type as u32, raw_type);'
+          if s.count(a) != 1: raise SystemExit(f'unexpected mapping control count: {s.count(a)}')
+          p.write_text(s.replace(a, b, 1))
           PY
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "arch/src/x86_64/tdx/mod.rs"
-
       - name: Pin toolchain
         run: |
-          set -euo pipefail
           rustup toolchain install 1.89.0 --profile minimal
           rustup component add --toolchain 1.89.0 rustfmt clippy
           rustup override set 1.89.0
-
-      - name: List TDVF focused tests
-        shell: bash
+      - name: Compile and list TDVF tests
         run: |
-          set -euo pipefail
-          cargo test --locked -p arch --features tdx,kvm --lib -- --list | tee /tmp/tdvf-tests.txt
+          set +e
+          cargo test --locked -p arch --features tdx,kvm --lib -- --list > /tmp/tdvf-tests.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/tdvf-tests.txt
+          if [ "$rc" -ne 0 ]; then
+            msg=$(tail -n 24 /tmp/tdvf-tests.txt | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error title=TDVF compile::$msg"
+            exit "$rc"
+          fi
           grep -F 'tdvf_unknown_section_type_is_rejected' /tmp/tdvf-tests.txt
           grep -F 'tdvf_known_and_reserved_section_types_are_validated' /tmp/tdvf-tests.txt
-
       - name: Prove unknown type rejection
         run: cargo test --locked -p arch --features tdx,kvm --lib tdvf_unknown_section_type_is_rejected -- --nocapture
-
       - name: Prove exact represented type mapping
         run: cargo test --locked -p arch --features tdx,kvm --lib tdvf_known_and_reserved_section_types_are_validated -- --nocapture
-
       - name: Run broad TDVF gates
-        shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p arch --features tdx,kvm --lib
@@ -94,7 +80,6 @@ jobs:
           cargo clippy --locked -p arch --features tdx,kvm --all-targets -- -D warnings
           cargo fmt --all -- --check
           git diff --check
-
       - name: Amend one clean source commit
         run: |
           set -euo pipefail
@@ -106,8 +91,5 @@ jobs:
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
           test "$(git diff --name-only "$BASE_SHA"..HEAD)" = "arch/src/x86_64/tdx/mod.rs"
           git log -1 --format=%B | grep -F 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
-
       - name: Publish clean review branch
-        run: |
-          set -euo pipefail
-          git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
+        run: git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
