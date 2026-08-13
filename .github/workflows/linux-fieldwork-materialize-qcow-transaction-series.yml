@@ -1,0 +1,125 @@
+name: Linux Fieldwork materialize QCOW transaction ordering series
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-qcow-transaction-series
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build commit 1 - failure-atomic cache publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          git checkout 29a3bb535b4825540d612fdc6691d203f7cd09ef -- \
+            block/src/formats/qcow/vec_cache.rs \
+            block/src/formats/qcow/refcount.rs
+          git diff --check
+          git diff --name-only | sort > /tmp/c1-files
+          printf '%s\n' block/src/formats/qcow/refcount.rs block/src/formats/qcow/vec_cache.rs | sort > /tmp/c1-expected
+          cmp /tmp/c1-files /tmp/c1-expected
+          cargo test --locked -p block failed_eviction_keeps_dirty_victim
+          cargo test --locked -p block failed_refblock_eviction_keeps_dirty_victim_and_old_pointer
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add block/src/formats/qcow/vec_cache.rs block/src/formats/qcow/refcount.rs
+          git commit -s -m 'block: make QCOW cache eviction failure-atomic' -m 'Keep a dirty cache victim resident until its fallible write succeeds, and publish newly allocated refcount blocks only after their cache insertion succeeds. A failed eviction therefore retains the retryable in-memory copy and leaves the replacement pointer unpublished.'
+          C1=$(git rev-parse HEAD)
+          echo "C1=$C1" >> "$GITHUB_ENV"
+
+      - name: Build commit 2 - L2 ownership and publication ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout eb7c0f17e0f6a1e0ca5ecd6124dbd030dcd8f525 -- block/src/formats/qcow/metadata.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("block/src/formats/qcow/metadata.rs")
+          s = p.read_text()
+          old = '''        if !self.l2_cache.contains_key(l1_index) {
+              let l2_table = if l2_addr_disk == 0 {
+                  // Allocate and own the new L2 table before publishing it through L1.
+                  let new_addr = self.get_new_cluster(None)?;
+                  self.set_cluster_refcount_track_freed(new_addr, 1)?;
+                  self.l1_table[l1_index] = new_addr;
+                  VecCache::new(self.l2_entries as usize)
+              } else {
+                  self.reject_invalid_cluster_offset(l2_addr_disk)?;
+                  VecCache::from_vec(self.raw_file.read_pointer_cluster(l2_addr_disk, None)?)
+              };
+              let l1_table = &self.l1_table;
+              let raw_file = &mut self.raw_file;
+              self.l2_cache.insert(l1_index, l2_table, |index, evicted| {
+                  raw_file.write_pointer_table_direct(l1_table[index], evicted.iter())
+              })?;
+          }
+'''
+          new = '''        if !self.l2_cache.contains_key(l1_index) {
+              let mut new_addr_to_publish = None;
+              let l2_table = if l2_addr_disk == 0 {
+                  // Own the new L2 before any operation can make it reachable.
+                  let new_addr = self.get_new_cluster(None)?;
+                  self.set_cluster_refcount_track_freed(new_addr, 1)?;
+                  new_addr_to_publish = Some(new_addr);
+                  VecCache::new(self.l2_entries as usize)
+              } else {
+                  self.reject_invalid_cluster_offset(l2_addr_disk)?;
+                  VecCache::from_vec(self.raw_file.read_pointer_cluster(l2_addr_disk, None)?)
+              };
+              let l1_table = &self.l1_table;
+              let raw_file = &mut self.raw_file;
+              self.l2_cache.insert(l1_index, l2_table, |index, evicted| {
+                  raw_file.write_pointer_table_direct(l1_table[index], evicted.iter())
+              })?;
+              if let Some(new_addr) = new_addr_to_publish {
+                  self.l1_table[l1_index] = new_addr;
+              }
+          }
+'''
+          if s.count(old) != 1:
+              raise SystemExit("fresh L2 transaction anchor drifted")
+          p.write_text(s.replace(old, new, 1))
+          PY
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only HEAD)" = "block/src/formats/qcow/metadata.rs"
+          cargo test --locked -p block fresh_l2_enospc_reopen_does_not_reuse_live_table
+          cargo test --locked -p block relocated_l2_dropped_deferred_updates_keeps_refcount_owner
+          cargo test --locked -p block zero_marker_fresh_l2_keeps_refcount_owner
+          cargo test --locked -p block failed_l2_relocate_keeps_live_table_off_free_lists
+          cargo test --locked -p block failed_l2_relocate_after_compressed_write_keeps_live_table
+          git add block/src/formats/qcow/metadata.rs
+          git commit -s -m 'block: own QCOW L2 tables before publication' -m 'Make fresh L2 creation one ordered transaction: allocate the metadata cluster, establish refcount ownership, complete fallible cache insertion, then publish the L1 pointer. Relocated clean L2 replacements likewise acquire ownership before publication while release of the old table stays deferred.'
+          C2=$(git rev-parse HEAD)
+          echo "C2=$C2" >> "$GITHUB_ENV"
+
+      - name: Validate complete block series
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p block
+          cargo test --locked -p block --features io_uring
+          cargo clippy --locked -p block --all-targets --tests -- -D warnings
+          cargo clippy --locked -p block --features io_uring --all-targets --tests -- -D warnings
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git rev-list --count 1af93ac7035cda77cd87b0c18b1134ebb0928052..HEAD)" = 2
+          test "$(git diff --name-only 1af93ac7035cda77cd87b0c18b1134ebb0928052..$C1 | sort)" = $'block/src/formats/qcow/refcount.rs\nblock/src/formats/qcow/vec_cache.rs'
+          test "$(git diff --name-only $C1..HEAD)" = "block/src/formats/qcow/metadata.rs"
+
+      - name: Publish clean two-commit series
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin +HEAD:refs/heads/linux-fieldwork/qcow-transaction-ordering-series
