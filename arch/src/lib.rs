@@ -21,6 +21,8 @@ use vm_memory::bitmap::AtomicBitmap;
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;
 
+pub mod smbios;
+
 /// Type for returning error code.
 #[derive(Debug, Error)]
 pub enum Error {

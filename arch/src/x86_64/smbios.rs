@@ -14,6 +14,8 @@ use vm_memory::{Address, ByteValued, Bytes, GuestAddress};
 
 use crate::GuestMemoryMmap;
 use crate::layout::SMBIOS_START;
+use crate::smbios::{DEFAULT_SYSTEM_MANUFACTURER, DEFAULT_SYSTEM_PRODUCT_NAME};
+pub use crate::smbios::{SmbiosChassisConfig, SmbiosConfig, SmbiosSystem};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -55,38 +57,6 @@ const CHASSIS_STATE_UNKNOWN: u8 = 0x02;
 const CHASSIS_SECURITY_STATUS_NONE: u8 = 0x03;
 const PCI_SUPPORTED: u64 = 1 << 7;
 const IS_VIRTUAL_MACHINE: u8 = 1 << 4;
-pub const DEFAULT_SYSTEM_MANUFACTURER: &str = "Cloud Hypervisor";
-pub const DEFAULT_SYSTEM_PRODUCT_NAME: &str = "cloud-hypervisor";
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SmbiosConfig {
-    pub system: Option<SmbiosSystem>,
-    pub chassis: Option<SmbiosChassisConfig>,
-    pub oem_strings: Box<[String]>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SmbiosSystem {
-    pub manufacturer: Option<String>,
-    pub product_name: Option<String>,
-    pub version: Option<String>,
-    pub serial_number: Option<String>,
-    pub uuid: Option<String>,
-    pub sku_number: Option<String>,
-    pub family: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SmbiosChassisConfig {
-    pub asset_tag: Option<String>,
-}
-
-impl SmbiosConfig {
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
 fn compute_checksum<T: Copy + ByteValued>(v: &T) -> u8 {
     let mut checksum: u8 = 0;
     for i in v.as_slice().iter() {
