@@ -571,7 +571,10 @@ impl ReceiveAdditionalConnections {
                 )));
             }
 
-            receive_memory_ranges(guest_memory, &req, socket)?;
+            if !receive_memory_ranges_abortable(guest_memory, &req, socket, Some(kill_evt))? {
+                debug!("Got signal to tear down connection while receiving memory payload.");
+                return Ok(());
+            }
             Response::ok().write_to(socket)?;
         }
     }
@@ -1251,6 +1254,15 @@ pub(crate) fn receive_memory_ranges(
     req: &Request,
     socket: &mut SocketStream,
 ) -> Result<(), MigratableError> {
+    receive_memory_ranges_abortable(guest_memory, req, socket, None).map(|_| ())
+}
+
+fn receive_memory_ranges_abortable(
+    guest_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
+    req: &Request,
+    socket: &mut SocketStream,
+    kill_evt: Option<&EventFd>,
+) -> Result<bool, MigratableError> {
     debug_assert_eq!(req.command(), Command::Memory);
     // Read the memory table
     let ranges = MemoryRangeTable::read_from(socket, req.length())?;
@@ -1266,6 +1278,14 @@ pub(crate) fn receive_memory_ranges(
         // following the correct behavior. For more info about this issue
         // see: https://github.com/rust-vmm/vm-memory/issues/174
         loop {
+            if let Some(kill_evt) = kill_evt
+                && !wait_for_readable(socket, kill_evt)
+                    .context("Failed to poll memory payload fds")
+                    .map_err(MigratableError::MigrateReceive)?
+            {
+                return Ok(false);
+            }
+
             let bytes_read = mem
                 .read_volatile_from(
                     GuestAddress(range.gpa + offset),
@@ -1282,7 +1302,7 @@ pub(crate) fn receive_memory_ranges(
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1357,5 +1377,60 @@ mod tests {
                 .to_string(),
             "Invalid TCP port: 99999"
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_payload_abort_tests {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use vm_memory::{GuestAddress, GuestMemoryAtomic};
+    use vm_migration::protocol::{MemoryRange, MemoryRangeTable, Request};
+    use vmm_sys_util::eventfd::EventFd;
+
+    use super::{ReceiveAdditionalConnections, SocketStream};
+    use crate::GuestMemoryMmap;
+
+    #[test]
+    fn test_memory_worker_abort_interrupts_stalled_payload() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let guest_memory = GuestMemoryAtomic::new(memory);
+        let kill_evt = EventFd::new(0).unwrap();
+        let worker_kill_evt = kill_evt.try_clone().unwrap();
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut socket = SocketStream::Unix(receiver);
+            let result = ReceiveAdditionalConnections::worker_receive_memory(
+                &mut socket,
+                &worker_kill_evt,
+                &guest_memory,
+            );
+            let _ = done_tx.send(result);
+        });
+
+        let mut ranges = MemoryRangeTable::default();
+        ranges.push(MemoryRange {
+            gpa: 0,
+            length: 0x1000,
+        });
+        Request::memory(ranges.length())
+            .write_to(&mut sender)
+            .unwrap();
+        ranges.write_to(&mut sender).unwrap();
+        sender.write_all(&[0x5a]).unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        kill_evt.write(1).unwrap();
+
+        let result = done_rx
+            .recv_timeout(Duration::from_millis(750))
+            .expect("memory worker did not stop after kill event while payload was stalled");
+        assert!(result.is_ok(), "memory worker returned {result:?}");
     }
 }
