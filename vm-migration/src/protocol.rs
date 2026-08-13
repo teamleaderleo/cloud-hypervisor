@@ -565,10 +565,26 @@ impl MemoryRangeTable {
     }
 
     pub fn read_from(fd: &mut dyn Read, length: u64) -> Result<MemoryRangeTable, MigratableError> {
-        assert!((length as usize).is_multiple_of(size_of::<MemoryRange>()));
+        let length = usize::try_from(length).map_err(|_| {
+            MigratableError::MigrateReceive(anyhow!(
+                "invalid memory range table length: {length} does not fit in usize"
+            ))
+        })?;
+        if !length.is_multiple_of(size_of::<MemoryRange>()) {
+            return Err(MigratableError::MigrateReceive(anyhow!(
+                "invalid memory range table length: {length} is not a multiple of {}",
+                size_of::<MemoryRange>()
+            )));
+        }
 
-        let mut data: Vec<MemoryRange> =
-            vec![MemoryRange::default(); length as usize / size_of::<MemoryRange>()];
+        let entries = length / size_of::<MemoryRange>();
+        let mut data = Vec::new();
+        data.try_reserve_exact(entries).map_err(|source| {
+            MigratableError::MigrateReceive(anyhow!(
+                "invalid memory range table length: cannot allocate {entries} entries: {source}"
+            ))
+        })?;
+        data.resize(entries, MemoryRange::default());
 
         fd.read_exact(data.as_mut_bytes())
             .map_err(MigratableError::MigrateSocket)?;
@@ -684,6 +700,41 @@ mod unit_tests {
         ConnectionRole::read_from(&mut cursor).unwrap_err();
     }
 
+    #[test]
+    fn test_memory_range_table_rejects_unaligned_length() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let err = MemoryRangeTable::read_from(&mut cursor, 1).unwrap_err();
+        assert!(matches!(err, crate::MigratableError::MigrateReceive(_)));
+    }
+
+    #[test]
+    fn test_memory_range_table_rejects_impossible_aligned_capacity() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let length = u64::MAX - (size_of::<MemoryRange>() as u64 - 1);
+        let err = MemoryRangeTable::read_from(&mut cursor, length).unwrap_err();
+        assert!(matches!(err, crate::MigratableError::MigrateReceive(_)));
+    }
+
+    #[test]
+    fn test_memory_range_table_zero_length_is_valid() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let table = MemoryRangeTable::read_from(&mut cursor, 0).unwrap();
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn test_memory_range_table_one_record_roundtrip() {
+        let range = MemoryRange {
+            gpa: 0x4000,
+            length: 0x2000,
+        };
+        let mut bytes = Vec::new();
+        range.write_to(&mut bytes).unwrap();
+        let mut cursor = Cursor::new(bytes);
+        let table =
+            MemoryRangeTable::read_from(&mut cursor, size_of::<MemoryRange>() as u64).unwrap();
+        assert_eq!(table.regions(), &[range]);
+    }
     #[test]
     fn test_memory_range_table_from_dirty_ranges_iter() {
         let input = [0b1111_1110_1110, 0b1_0000];
