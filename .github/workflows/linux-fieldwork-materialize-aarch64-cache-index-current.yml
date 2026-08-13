@@ -1,0 +1,69 @@
+name: Linux Fieldwork materialize current AArch64 cache identity candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-aarch64-cache-index-current
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply validated leaf-identity successor
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin linux-fieldwork/cache-index-portability
+          test "$(git rev-parse FETCH_HEAD)" = "8dfd55a96b0cbf3d6891c25735455b8b793133e9"
+          git show FETCH_HEAD:linux-fieldwork/cache-index/candidate.patch > /tmp/cache-index.patch
+          test "$(git hash-object /tmp/cache-index.patch)" = "b6e21517377995f35ff6984ffc29f06a21db06b7"
+
+          git checkout --detach d636bf08a9dbfda61bc34df6b6d7e4ac84e994c8
+          test "$(git rev-parse HEAD:arch/src/aarch64/cache.rs)" = "c2bfbc0202710a91a9fd6f6e120d92c3f1c41d33"
+          git apply --check /tmp/cache-index.patch
+          git apply /tmp/cache-index.patch
+          git diff --check
+          cargo fmt --all -- --check
+
+      - name: Validate leaf classification on AArch64
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'
+          cargo test --locked -p arch --features kvm --target aarch64-unknown-linux-gnu aarch64::cache::tests
+          cargo clippy --locked -p arch --all-targets --features kvm --target aarch64-unknown-linux-gnu -- -D warnings
+          cargo check --locked -p vmm --features kvm --target aarch64-unknown-linux-gnu
+          cargo check --locked -p vmm --features mshv --target aarch64-unknown-linux-gnu
+
+      - name: Cross-check x86 and one-file scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p vmm --all-targets --features kvm -- -D warnings
+          cargo fmt --all -- --check
+          git diff --check
+          test "$(git diff --name-only)" = "arch/src/aarch64/cache.rs"
+
+      - name: Publish clean series branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add arch/src/aarch64/cache.rs
+          git commit -s -m 'aarch64: identify cache leaves by level and type' -m 'Linux cacheinfo indices identify leaves rather than fixed cache levels. Discover each leaf from its exported level and type, map only the split-L1/unified-L2/L3 model the current guest firmware can represent, and omit unsupported valid host layouts instead of assigning their bytes to the wrong guest cache identity.'
+          test "$(git rev-parse HEAD^)" = "d636bf08a9dbfda61bc34df6b6d7e4ac84e994c8"
+          test "$(git diff --name-only d636bf08a9dbfda61bc34df6b6d7e4ac84e994c8..HEAD)" = "arch/src/aarch64/cache.rs"
+          git push origin +HEAD:refs/heads/linux-fieldwork/aarch64-cache-index-current-series
