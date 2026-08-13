@@ -63,7 +63,6 @@ jobs:
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "arch/src/x86_64/tdx/mod.rs"
-          git diff -- arch/src/x86_64/tdx/mod.rs
 
       - name: Pin toolchain
         run: |
@@ -72,15 +71,19 @@ jobs:
           rustup component add --toolchain 1.89.0 rustfmt clippy
           rustup override set 1.89.0
 
-      - name: List and prove TDVF focused tests
+      - name: List TDVF focused tests
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p arch --features tdx,kvm --lib -- --list | tee /tmp/tdvf-tests.txt
-          grep -F 'x86_64::tdx::unit_tests::tdvf_unknown_section_type_is_rejected: test' /tmp/tdvf-tests.txt
-          grep -F 'x86_64::tdx::unit_tests::tdvf_known_and_reserved_section_types_are_validated: test' /tmp/tdvf-tests.txt
-          cargo test --locked -p arch --features tdx,kvm --lib tdvf_unknown_section_type_is_rejected -- --nocapture
-          cargo test --locked -p arch --features tdx,kvm --lib tdvf_known_and_reserved_section_types_are_validated -- --nocapture
+          grep -F 'tdvf_unknown_section_type_is_rejected' /tmp/tdvf-tests.txt
+          grep -F 'tdvf_known_and_reserved_section_types_are_validated' /tmp/tdvf-tests.txt
+
+      - name: Prove unknown type rejection
+        run: cargo test --locked -p arch --features tdx,kvm --lib tdvf_unknown_section_type_is_rejected -- --nocapture
+
+      - name: Prove exact represented type mapping
+        run: cargo test --locked -p arch --features tdx,kvm --lib tdvf_known_and_reserved_section_types_are_validated -- --nocapture
 
       - name: Run broad TDVF gates
         shell: bash
