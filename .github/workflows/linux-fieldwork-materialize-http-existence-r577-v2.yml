@@ -1,0 +1,151 @@
+name: Linux Fieldwork materialize bare-VMM lifecycle existence
+
+on:
+  push:
+    branches: [linux-fieldwork/materialize-http-existence-r577-v2]
+    paths: [.github/workflows/linux-fieldwork-materialize-http-existence-r577-v2.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
+      TARGET_BRANCH: linux-fieldwork/review-http-existence-r577
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reset exact source
+        run: |
+          set -euo pipefail
+          git reset --hard "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+      - name: Apply narrow lifecycle identity repair
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('vmm/src/lib.rs')
+          s = p.read_text()
+
+          request_handler = 'impl RequestHandler for Vmm {'
+          helper = '\n'.join([
+              'impl Vmm {',
+              '    fn no_owned_vm_error(&self) -> VmError {',
+              '        if self.vm_config.is_some() {',
+              '            VmError::VmNotRunning',
+              '        } else {',
+              '            VmError::VmNotCreated',
+              '        }',
+              '    }',
+              '}',
+              '',
+              request_handler,
+          ])
+          if s.count(request_handler) != 1:
+              raise SystemExit(f'unexpected RequestHandler impl count: {s.count(request_handler)}')
+          s = s.replace(request_handler, helper, 1)
+
+          for method in ['pause', 'resume']:
+              old = '\n'.join([
+                  f'    fn vm_{method}(&mut self) -> result::Result<(), VmError> {{',
+                  '        match self.vm {',
+                  f'            VmOwnership::Owned(ref mut vm) => vm.{method}().map_err(VmError::{method.capitalize()}),',
+                  '            VmOwnership::Migration { .. } => Err(VmError::VmMigrating),',
+                  '            VmOwnership::None => Err(VmError::VmNotRunning),',
+                  '        }',
+                  '    }',
+              ])
+              new = old.replace('VmOwnership::None => Err(VmError::VmNotRunning),', 'VmOwnership::None => Err(self.no_owned_vm_error()),')
+              if s.count(old) != 1:
+                  raise SystemExit(f'unexpected vm_{method} owner count: {s.count(old)}')
+              s = s.replace(old, new, 1)
+
+          old_shutdown = '        let mut vm = self.vm.take_owned_or(VmError::VmNotRunning)?;'
+          new_shutdown = '\n'.join([
+              '        let no_vm_error = self.no_owned_vm_error();',
+              '        let mut vm = self.vm.take_owned_or(no_vm_error)?;',
+          ])
+          if s.count(old_shutdown) != 1:
+              raise SystemExit(f'unexpected shutdown owner count: {s.count(old_shutdown)}')
+          s = s.replace(old_shutdown, new_shutdown, 1)
+
+          old_power = '\n'.join([
+              '    fn vm_power_button(&mut self) -> result::Result<(), VmError> {',
+              '        match self.vm {',
+              '            VmOwnership::Owned(ref mut vm) => vm.power_button(),',
+              '            VmOwnership::Migration { .. } => Err(VmError::VmMigrating),',
+              '            VmOwnership::None => Err(VmError::VmNotRunning),',
+              '        }',
+              '    }',
+          ])
+          new_power = old_power.replace('VmOwnership::None => Err(VmError::VmNotRunning),', 'VmOwnership::None => Err(self.no_owned_vm_error()),')
+          if s.count(old_power) != 1:
+              raise SystemExit(f'unexpected power-button owner count: {s.count(old_power)}')
+          s = s.replace(old_power, new_power, 1)
+
+          anchor = '    #[test]\n    fn test_vmm_vm_create() {'
+          tests = '\n'.join([
+              '    fn assert_vm_not_created(result: result::Result<(), VmError>) {',
+              '        assert!(matches!(result.unwrap_err(), VmError::VmNotCreated));',
+              '    }',
+              '',
+              '    fn assert_vm_not_running(result: result::Result<(), VmError>) {',
+              '        assert!(matches!(result.unwrap_err(), VmError::VmNotRunning));',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn test_bare_vmm_lifecycle_reports_not_created() {',
+              '        let mut vmm = create_dummy_vmm();',
+              '        assert_vm_not_created(vmm.vm_pause());',
+              '        assert_vm_not_created(vmm.vm_resume());',
+              '        assert_vm_not_created(vmm.vm_shutdown());',
+              '        assert_vm_not_created(vmm.vm_power_button());',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn test_created_unbooted_vmm_lifecycle_reports_not_running() {',
+              '        let mut vmm = create_dummy_vmm();',
+              '        vmm.vm_create(create_dummy_vm_config()).unwrap();',
+              '        assert_vm_not_running(vmm.vm_pause());',
+              '        assert_vm_not_running(vmm.vm_resume());',
+              '        assert_vm_not_running(vmm.vm_shutdown());',
+              '        assert_vm_not_running(vmm.vm_power_button());',
+              '    }',
+              '',
+              anchor,
+          ])
+          if s.count(anchor) != 1:
+              raise SystemExit(f'unexpected VMM test anchor count: {s.count(anchor)}')
+          s = s.replace(anchor, tests, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "vmm/src/lib.rs"
+      - name: Validate lifecycle identity repair
+        run: |
+          set -euo pipefail
+          cargo test --locked -p vmm --features kvm --lib -- --list | tee /tmp/test-list.txt
+          grep -F 'test_bare_vmm_lifecycle_reports_not_created' /tmp/test-list.txt
+          grep -F 'test_created_unbooted_vmm_lifecycle_reports_not_running' /tmp/test-list.txt
+          cargo test --locked -p vmm --features kvm --lib test_bare_vmm_lifecycle_reports_not_created -- --nocapture
+          cargo test --locked -p vmm --features kvm --lib test_created_unbooted_vmm_lifecycle_reports_not_running -- --nocapture
+          cargo clippy --locked -p vmm --features kvm --lib --tests -- -D warnings -A unfulfilled-lint-expectations
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Commit clean source candidate
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add vmm/src/lib.rs
+          git commit --signoff -m 'vmm: Distinguish absent VM from unbooted VM' -m 'Return VmNotCreated for pause, resume, shutdown and power-button when no VM configuration exists, while preserving VmNotRunning for a configured but unbooted VM. The existing HTTP mapping then returns 404 only for the genuinely absent case.'
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
+          test "$(git diff --name-only "$BASE_SHA"..HEAD)" = "vmm/src/lib.rs"
+          git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
