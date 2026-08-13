@@ -1,0 +1,180 @@
+name: Linux Fieldwork materialize virtio-pci restore source
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-virtio-pci-restore-source
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply retained product patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
+          test "$(git rev-parse 1af93ac7035cda77cd87b0c18b1134ebb0928052:virtio-devices/src/transport/pci_device.rs)" = "0c1593f53f624c0e23845c3b08339f6ab57e6355"
+          cat > /tmp/candidate.patch <<'PATCH'
+          diff --git a/virtio-devices/src/transport/pci_device.rs b/virtio-devices/src/transport/pci_device.rs
+          --- a/virtio-devices/src/transport/pci_device.rs
+          +++ b/virtio-devices/src/transport/pci_device.rs
+          @@ -578,16 +578,16 @@
+                           queue
+                               .try_set_used_ring_address(GuestAddress(state.queues[i].used_ring))
+                               .unwrap();
+          -                queue.set_next_avail(
+          -                    queue
+          +                if queue.ready() {
+          +                    let used_idx = queue
+                                   .used_idx(memory.memory().deref(), Ordering::Acquire)
+          -                        .unwrap()
+          -                        .0,
+          -                );
+          -                queue.set_next_used(
+          -                    queue
+          -                        .used_idx(memory.memory().deref(), Ordering::Acquire)
+          -                        .unwrap()
+          -                        .0,
+          -                );
+          +                        .map_err(|e| {
+          +                            VirtioPciDeviceError::CreateVirtioPciDevice(anyhow!(
+          +                                "Failed to read used index for queue {i}: {e}"
+          +                            ))
+          +                        })?
+          +                        .0;
+          +                    queue.set_next_avail(used_idx);
+          +                    queue.set_next_used(used_idx);
+          +                }
+                       }
+          @@ -1374,2 +1374,3 @@
+               use vm_device::interrupt::InterruptSourceConfig;
+          +    use vm_memory::Bytes;
+          
+          @@ -1791,1 +1792,85 @@
+          +
+          +    const RESTORE_RAM_BASE: u64 = 0x4000_0000;
+          +    const RESTORE_QUEUE_SIZE: u16 = 256;
+          +
+          +    fn restored_queue_state(ready: bool, used_ring: u64) -> QueueState {
+          +        QueueState {
+          +            max_size: RESTORE_QUEUE_SIZE,
+          +            size: RESTORE_QUEUE_SIZE,
+          +            ready,
+          +            desc_table: if ready { RESTORE_RAM_BASE } else { 0 },
+          +            avail_ring: if ready { RESTORE_RAM_BASE + 0x1000 } else { 0 },
+          +            used_ring,
+          +        }
+          +    }
+          +
+          +    fn restore_virtio_pci_device(
+          +        memory: GuestMemoryAtomic<GuestMemoryMmap>,
+          +        state: &VirtioPciDeviceState,
+          +    ) -> Result<VirtioPciDevice> {
+          +        let device = Arc::new(Mutex::new(QueuedTestDevice {
+          +            queue_sizes: vec![RESTORE_QUEUE_SIZE; state.queues.len()],
+          +        }));
+          +        let snapshot = Snapshot::new_from_state(state).unwrap();
+          +
+          +        VirtioPciDevice::new(
+          +            "test-dev".to_string(),
+          +            memory,
+          +            device,
+          +            None,
+          +            &TestInterruptManager,
+          +            0,
+          +            EventFd::new(EFD_NONBLOCK).unwrap(),
+          +            false,
+          +            None,
+          +            Arc::new(Mutex::new(Vec::new())),
+          +            Some(&snapshot),
+          +        )
+          +    }
+          +
+          +    #[test]
+          +    fn restore_inactive_queue_skips_used_index_read() {
+          +        let memory = GuestMemoryAtomic::new(
+          +            GuestMemoryMmap::from_ranges(&[(GuestAddress(RESTORE_RAM_BASE), 0x4000)]).unwrap(),
+          +        );
+          +        let state = VirtioPciDeviceState {
+          +            device_activated: false,
+          +            queues: vec![restored_queue_state(false, 0)],
+          +            interrupt_status: 0,
+          +            cap_pci_cfg_offset: 0,
+          +            cap_pci_cfg: VirtioPciCfgCap::new().as_slice().to_vec(),
+          +        };
+          +
+          +        let dev = restore_virtio_pci_device(memory, &state).unwrap();
+          +        assert_eq!(dev.queues[0].next_avail(), 0);
+          +        assert_eq!(dev.queues[0].next_used(), 0);
+          +    }
+          +
+          +    #[test]
+          +    fn restore_partially_enabled_device_skips_unready_queue() {
+          +        let memory = GuestMemoryAtomic::new(
+          +            GuestMemoryMmap::from_ranges(&[(GuestAddress(RESTORE_RAM_BASE), 0x4000)]).unwrap(),
+          +        );
+          +        let used_ring = RESTORE_RAM_BASE + 0x2000;
+          +        memory
+          +            .memory()
+          +            .write_obj(5u16.to_le(), GuestAddress(used_ring + 2))
+          +            .unwrap();
+          +        let state = VirtioPciDeviceState {
+          +            device_activated: true,
+          +            queues: vec![
+          +                restored_queue_state(true, used_ring),
+          +                restored_queue_state(false, 0),
+          +            ],
+          +            interrupt_status: 0,
+          +            cap_pci_cfg_offset: 0,
+          +            cap_pci_cfg: VirtioPciCfgCap::new().as_slice().to_vec(),
+          +        };
+          +
+          +        let dev = restore_virtio_pci_device(memory, &state).unwrap();
+          +        assert_eq!(dev.queues[0].next_avail(), 5);
+          +        assert_eq!(dev.queues[0].next_used(), 5);
+          +        assert_eq!(dev.queues[1].next_avail(), 0);
+          +        assert_eq!(dev.queues[1].next_used(), 0);
+          +    }
+           }
+          PATCH
+          sed -i 's/^          //' /tmp/candidate.patch
+          git apply --check /tmp/candidate.patch
+          git apply /tmp/candidate.patch
+          git diff --check
+
+      - name: Focused restore tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p virtio-devices --lib restore_inactive_queue_skips_used_index_read --features kvm
+          cargo test --locked -p virtio-devices --lib restore_partially_enabled_device_skips_unready_queue --features kvm
+
+      - name: Formatting and backend Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup component add rustfmt clippy
+          cargo fmt --all -- --check
+          cargo clippy --locked -p virtio-devices --features kvm -- -D warnings
+          cargo clippy --locked -p virtio-devices --features mshv -- -D warnings
+
+      - name: Publish clean source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout -B linux-fieldwork/virtio-pci-restore-source 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          git apply /tmp/candidate.patch
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add virtio-devices/src/transport/pci_device.rs
+          git commit -s -m 'virtio-pci: skip ring index restore for unready queues' -m 'Restored queues may be inactive even when another queue on the same device is ready. Reading the used ring for an unready queue can therefore address guest memory that was never configured. Restore ring progress only for ready queues and reuse the single fallible used-index read for both counters.'
+          test "$(git diff --name-only 1af93ac7035cda77cd87b0c18b1134ebb0928052..HEAD)" = "virtio-devices/src/transport/pci_device.rs"
+          git push origin +HEAD:refs/heads/linux-fieldwork/virtio-pci-restore-source
