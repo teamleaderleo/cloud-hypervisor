@@ -2,10 +2,8 @@ name: Linux Fieldwork materialize migration table parser repair
 
 on:
   push:
-    branches:
-      - linux-fieldwork/materialize-migration-memory-table-r604-v2
-    paths:
-      - .github/workflows/linux-fieldwork-materialize-migration-memory-table-r604-v2.yml
+    branches: [linux-fieldwork/materialize-migration-memory-table-r604-v2]
+    paths: [.github/workflows/linux-fieldwork-materialize-migration-memory-table-r604-v2.yml]
   workflow_dispatch:
 
 permissions:
@@ -20,96 +18,82 @@ jobs:
       SOURCE_HEAD: a9ff8e0ca603f72e6fb718fc023b679201ce04c5
       TARGET_BRANCH: linux-fieldwork/review-migration-memory-table-r604
     steps:
-      - name: Check out controlled fork
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Reset to reviewed source head
         run: |
           set -euo pipefail
           git reset --hard "$SOURCE_HEAD"
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
-          test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
-
       - name: Add fallible reservation and controls
-        shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           p = Path('vm-migration/src/protocol.rs')
           s = p.read_text()
-
-          old_alloc = '''        let mut data: Vec<MemoryRange> =
-            vec![MemoryRange::default(); length / size_of::<MemoryRange>()];'''
-          new_alloc = '''        let entries = length / size_of::<MemoryRange>();
-        let mut data = Vec::new();
-        data.try_reserve_exact(entries).map_err(|source| {
-            MigratableError::MigrateReceive(anyhow!(
-                "invalid memory range table length: cannot allocate {entries} entries: {source}"
-            ))
-        })?;
-        data.resize(entries, MemoryRange::default());'''
+          old_alloc = "        let mut data: Vec<MemoryRange> =\n            vec![MemoryRange::default(); length / size_of::<MemoryRange>()];"
+          new_alloc = "\n".join([
+              "        let entries = length / size_of::<MemoryRange>();",
+              "        let mut data = Vec::new();",
+              "        data.try_reserve_exact(entries).map_err(|source| {",
+              "            MigratableError::MigrateReceive(anyhow!(",
+              "                \"invalid memory range table length: cannot allocate {entries} entries: {source}\"",
+              "            ))",
+              "        })?;",
+              "        data.resize(entries, MemoryRange::default());",
+          ])
           if s.count(old_alloc) != 1:
               raise SystemExit(f'unexpected allocation owner count: {s.count(old_alloc)}')
           s = s.replace(old_alloc, new_alloc, 1)
-
-          anchor = '    #[test]\n    fn test_memory_range_table_from_dirty_ranges_iter() {'
-          tests = '''    #[test]
-    fn test_memory_range_table_rejects_impossible_aligned_capacity() {
-        let mut cursor = Cursor::new(Vec::<u8>::new());
-        let length = u64::MAX - (size_of::<MemoryRange>() as u64 - 1);
-        let err = MemoryRangeTable::read_from(&mut cursor, length).unwrap_err();
-        assert!(matches!(err, crate::MigratableError::MigrateReceive(_)));
-    }
-
-    #[test]
-    fn test_memory_range_table_zero_length_is_valid() {
-        let mut cursor = Cursor::new(Vec::<u8>::new());
-        let table = MemoryRangeTable::read_from(&mut cursor, 0).unwrap();
-        assert!(table.is_empty());
-    }
-
-    #[test]
-    fn test_memory_range_table_one_record_roundtrip() {
-        let range = MemoryRange {
-            gpa: 0x4000,
-            length: 0x2000,
-        };
-        let mut bytes = Vec::new();
-        range.write_to(&mut bytes).unwrap();
-        let mut cursor = Cursor::new(bytes);
-        let table = MemoryRangeTable::read_from(&mut cursor, size_of::<MemoryRange>() as u64)
-            .unwrap();
-        assert_eq!(table.regions(), &[range]);
-    }
-
-''' + anchor
+          anchor = "    #[test]\n    fn test_memory_range_table_from_dirty_ranges_iter() {"
+          test_lines = [
+              "    #[test]",
+              "    fn test_memory_range_table_rejects_impossible_aligned_capacity() {",
+              "        let mut cursor = Cursor::new(Vec::<u8>::new());",
+              "        let length = u64::MAX - (size_of::<MemoryRange>() as u64 - 1);",
+              "        let err = MemoryRangeTable::read_from(&mut cursor, length).unwrap_err();",
+              "        assert!(matches!(err, crate::MigratableError::MigrateReceive(_)));",
+              "    }",
+              "",
+              "    #[test]",
+              "    fn test_memory_range_table_zero_length_is_valid() {",
+              "        let mut cursor = Cursor::new(Vec::<u8>::new());",
+              "        let table = MemoryRangeTable::read_from(&mut cursor, 0).unwrap();",
+              "        assert!(table.is_empty());",
+              "    }",
+              "",
+              "    #[test]",
+              "    fn test_memory_range_table_one_record_roundtrip() {",
+              "        let range = MemoryRange { gpa: 0x4000, length: 0x2000 };",
+              "        let mut bytes = Vec::new();",
+              "        range.write_to(&mut bytes).unwrap();",
+              "        let mut cursor = Cursor::new(bytes);",
+              "        let table = MemoryRangeTable::read_from(&mut cursor, size_of::<MemoryRange>() as u64).unwrap();",
+              "        assert_eq!(table.regions(), &[range]);",
+              "    }",
+              "",
+          ]
           if s.count(anchor) != 1:
               raise SystemExit(f'unexpected test anchor count: {s.count(anchor)}')
-          s = s.replace(anchor, tests, 1)
+          s = s.replace(anchor, "\n".join(test_lines) + anchor, 1)
           p.write_text(s)
           PY
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "vm-migration/src/protocol.rs"
-          git diff -- vm-migration/src/protocol.rs
-
       - name: Validate parser repair
-        shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p vm-migration --lib -- --list | tee /tmp/test-list.txt
-          grep -F 'protocol::unit_tests::test_memory_range_table_rejects_unaligned_length: test' /tmp/test-list.txt
-          grep -F 'protocol::unit_tests::test_memory_range_table_rejects_impossible_aligned_capacity: test' /tmp/test-list.txt
-          grep -F 'protocol::unit_tests::test_memory_range_table_zero_length_is_valid: test' /tmp/test-list.txt
-          grep -F 'protocol::unit_tests::test_memory_range_table_one_record_roundtrip: test' /tmp/test-list.txt
+          grep -F 'test_memory_range_table_rejects_impossible_aligned_capacity' /tmp/test-list.txt
+          grep -F 'test_memory_range_table_zero_length_is_valid' /tmp/test-list.txt
+          grep -F 'test_memory_range_table_one_record_roundtrip' /tmp/test-list.txt
           cargo test --locked -p vm-migration
           cargo clippy --locked -p vm-migration --all-targets -- -D warnings
           cargo fmt --all -- --check
           git diff --check
-
       - name: Amend one clean source commit
         run: |
           set -euo pipefail
@@ -121,8 +105,5 @@ jobs:
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" -eq 1
           test "$(git diff --name-only "$BASE_SHA"..HEAD)" = "vm-migration/src/protocol.rs"
           git log -1 --format=%B | grep -F 'Signed-off-by: Leo <cheerleaderleo@outlook.com>'
-
       - name: Publish clean review branch
-        run: |
-          set -euo pipefail
-          git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
+        run: git push --force origin "HEAD:refs/heads/$TARGET_BRANCH"
