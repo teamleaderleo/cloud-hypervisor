@@ -14,95 +14,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - name: Check out exact signed candidate
+      - name: Check out carrier
         uses: actions/checkout@v4
         with:
-          ref: 2038c3cb262ac27604f647729557893a61510f99
           fetch-depth: 0
 
-      - name: Configure commit identity
-        run: |
-          git config user.name 'Leo Li'
-          git config user.email 'cheerleaderleo@outlook.com'
-
-      - name: Apply streaming repair
+      - name: Restore exact signed candidate and apply streaming repair
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('vmm/src/memory_manager.rs')
-          text = p.read_text()
-
-          old = '''    let dirty_bitmap = vm_dirty_log
-        .bitmap
-        .iter()
-        .zip(vmm_dirty_bitmap.iter())
-        .map(|(vm, vmm)| vm | vmm)
-        .collect::<Vec<_>>();
-
-    let tail_bits = (page_count % u64::BITS as u64) as u32;
-    if tail_bits != 0 {
-        let valid_mask = (1u64 << tail_bits) - 1;
-        if let Some(last_word) = dirty_bitmap.last()
-            && last_word & !valid_mask != 0
-        {
-            return Err(anyhow!(
-                "Dirty bitmap contains bits outside the memory region"
-            ));
-        }
-    }
-
-    Ok(MemoryRangeTable::from_dirty_bitmap(
-        dirty_bitmap,
-'''
-          new = '''    let tail_bits = (page_count % u64::BITS as u64) as u32;
-    if tail_bits != 0 {
-        let valid_mask = (1u64 << tail_bits) - 1;
-        let last_word =
-            vm_dirty_log.bitmap[expected_words - 1] | vmm_dirty_bitmap[expected_words - 1];
-        if last_word & !valid_mask != 0 {
-            return Err(anyhow!(
-                "Dirty bitmap contains bits outside the memory region"
-            ));
-        }
-    }
-
-    let dirty_bitmap = vm_dirty_log
-        .bitmap
-        .iter()
-        .zip(vmm_dirty_bitmap.iter())
-        .map(|(vm, vmm)| vm | vmm);
-
-    Ok(MemoryRangeTable::from_dirty_bitmap(
-        dirty_bitmap,
-'''
-          old_test = '''        let error = dirty_bitmap_to_range_table(
-            &dirty_log(vec![1 << 2], bytes_per_bit),
-            &[0],
-            page_size(bytes_per_bit),
-            BASE_GPA,
-            bytes_per_bit * 2,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("outside the memory region"));
-'''
-          new_test = '''        for (vm_bitmap, vmm_bitmap) in [(vec![1 << 2], vec![0]), (vec![0], vec![1 << 2])] {
-            let error = dirty_bitmap_to_range_table(
-                &dirty_log(vm_bitmap, bytes_per_bit),
-                &vmm_bitmap,
-                page_size(bytes_per_bit),
-                BASE_GPA,
-                bytes_per_bit * 2,
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains("outside the memory region"));
-        }
-'''
-          if text.count(old) != 1 or text.count(old_test) != 1:
-              raise SystemExit(f'anchors production={text.count(old)} test={text.count(old_test)}')
-          p.write_text(text.replace(old, new, 1).replace(old_test, new_test, 1))
-          PY
+          cp .fieldwork/dirty-log-streaming.patch /tmp/dirty-log-streaming.patch
+          git reset --hard 2038c3cb262ac27604f647729557893a61510f99
+          test "$(git rev-parse HEAD)" = 2038c3cb262ac27604f647729557893a61510f99
+          git apply --check /tmp/dirty-log-streaming.patch
+          git apply /tmp/dirty-log-streaming.patch
           cargo fmt --all
           git diff --check
           test "$(git diff --name-only)" = "vmm/src/memory_manager.rs"
@@ -121,7 +46,7 @@ jobs:
           cargo clippy -p vmm --features kvm --all-targets --tests -- -D warnings
           cargo clippy -p vmm --features mshv --target x86_64-unknown-linux-gnu --all-targets --tests -- -D warnings
 
-      - name: Prove streaming-only delta and publish clean successor
+      - name: Publish clean successor
         shell: bash
         run: |
           set -euo pipefail
@@ -131,6 +56,8 @@ jobs:
             echo 'merged dirty bitmap still materialized' >&2
             exit 1
           fi
+          git config user.name 'Leo Li'
+          git config user.email 'cheerleaderleo@outlook.com'
           git add vmm/src/memory_manager.rs
           git commit -m 'vmm: stream merged dirty log bitmap' -m 'Avoid materializing a second full merged dirty bitmap during migration. Validate tail padding directly from the backend and VMM final words, then pass the lazy OR iterator into range conversion. Extend the padding-bit regression to cover invalid bits from either source.' -m 'Assisted-by: ChatGPT:GPT-5.6 Sol' -m 'Signed-off-by: Leo Li <cheerleaderleo@outlook.com>'
           git push origin HEAD:refs/heads/candidate/kvm-dirty-log-granule-streaming --force
