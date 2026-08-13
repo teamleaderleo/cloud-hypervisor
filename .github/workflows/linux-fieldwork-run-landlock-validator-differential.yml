@@ -1,0 +1,71 @@
+name: Linux Fieldwork run Landlock validator differential
+
+on:
+  push:
+    branches: [linux-fieldwork/materialize-landlock-validator-pair-v2]
+    paths: [.github/workflows/linux-fieldwork-run-landlock-validator-differential.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: garm-jammy-16
+    timeout-minutes: 80
+    env:
+      CANDIDATE_HEAD: 3ba95c02b3c2eb8b75ef211967eccfcbc0ee6583
+      BASELINE_HEAD: 14ba36afebf49138dfc9e67c1360e2e3b81d0bc4
+      TEST_FILTER: test_snapshot_restore_landlock_qcow_backing
+      PARALLEL_INTEGRATION_TESTS_NUM: 1
+    steps:
+      - name: Check out controlled fork
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify KVM runner
+        run: |
+          set -euo pipefail
+          test -e /dev/kvm
+          ls -l /dev/kvm
+      - name: Install Docker
+        run: |
+          set -eufo pipefail
+          sudo apt-get update
+          sudo apt-get -y install ca-certificates curl gnupg
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          sudo chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get -y install docker-ce docker-ce-cli
+      - name: Run product-candidate validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard "$CANDIDATE_HEAD"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_HEAD"
+          test "$(git rev-parse HEAD:cloud-hypervisor/tests/integration.rs)" = 08761e9c46234fa6ad2d44cb5d27f8ded073b68e
+          scripts/dev_cli.sh tests --integration --libc gnu --hypervisor kvm -- --test-filter "$TEST_FILTER" \
+            2>&1 | tee /tmp/landlock-candidate-runtime.log
+      - name: Run exact-baseline negative control
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard "$BASELINE_HEAD"
+          git clean -fd
+          test "$(git rev-parse HEAD)" = "$BASELINE_HEAD"
+          test "$(git rev-parse HEAD:cloud-hypervisor/tests/integration.rs)" = 08761e9c46234fa6ad2d44cb5d27f8ded073b68e
+          set +e
+          scripts/dev_cli.sh tests --integration --libc gnu --hypervisor kvm -- --test-filter "$TEST_FILTER" \
+            > /tmp/landlock-baseline-runtime.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/landlock-baseline-runtime.log
+          test "$rc" -ne 0
+          grep -F 'restore retained an unlisted QCOW backing path' /tmp/landlock-baseline-runtime.log
+      - name: Summarize differential
+        run: |
+          set -euo pipefail
+          echo 'candidate_runtime=pass'
+          echo 'baseline_runtime=expected-fail-retained-backing'
+          echo 'validator_blob=08761e9c46234fa6ad2d44cb5d27f8ded073b68e'
