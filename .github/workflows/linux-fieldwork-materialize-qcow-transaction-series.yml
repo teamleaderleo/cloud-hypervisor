@@ -25,6 +25,7 @@ jobs:
           git checkout 29a3bb535b4825540d612fdc6691d203f7cd09ef -- \
             block/src/formats/qcow/vec_cache.rs \
             block/src/formats/qcow/refcount.rs
+          git reset HEAD -- block/src/formats/qcow/vec_cache.rs block/src/formats/qcow/refcount.rs
           git diff --check
           git diff --name-only | sort > /tmp/c1-files
           printf '%s\n' block/src/formats/qcow/refcount.rs block/src/formats/qcow/vec_cache.rs | sort > /tmp/c1-expected
