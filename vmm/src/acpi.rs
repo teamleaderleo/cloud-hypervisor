@@ -25,6 +25,8 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryRegion};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::cpu::CpuManager;
+#[cfg(target_arch = "aarch64")]
+use crate::cpu::Error as CpuError;
 use crate::device_manager::DeviceManager;
 use crate::memory_manager::MemoryManager;
 use crate::pci_segment::PciSegment;
@@ -34,6 +36,10 @@ use crate::{GuestMemoryMmap, GuestRegionMmap};
 pub enum Error {
     #[error("ACPI table address overflow")]
     AddressOverflow,
+
+    #[cfg(target_arch = "aarch64")]
+    #[error("Failed to create ACPI processor topology")]
+    ProcessorTopology(#[source] CpuError),
 
     #[error("Missing fw_cfg device for ACPI tables")]
     MissingFwCfg,
@@ -958,7 +964,9 @@ fn create_acpi_tables_internal(
     // PPTT
     #[cfg(target_arch = "aarch64")]
     {
-        let pptt = cpu_manager.create_pptt();
+        let pptt = cpu_manager
+            .create_pptt()
+            .map_err(Error::ProcessorTopology)?;
         let pptt_addr = next_table_address(prev_tbl_addr, prev_tbl_len)?;
         let mut pptt_bytes = Vec::new();
 
