@@ -1978,6 +1978,13 @@ impl CpuManager {
     }
 
     #[cfg(target_arch = "aarch64")]
+    fn pptt_cache_exposure(l2_cache_shared: bool, l3_cache_shared: bool) -> (bool, bool) {
+        let expose_l2 = !l2_cache_shared;
+        let expose_l3 = expose_l2 && l3_cache_shared;
+        (expose_l2, expose_l3)
+    }
+
+    #[cfg(target_arch = "aarch64")]
     pub fn create_pptt(&self) -> Result<PPTT> {
         let mut cpus = 0;
         let mut uid = 0;
@@ -2004,12 +2011,16 @@ impl CpuManager {
             l3_cache_size,
             l3_cache_line_size,
             l3_cache_sets,
+            l2_cache_shared,
+            l3_cache_shared,
             ..
         } = cache_info.unwrap_or_default();
 
         let mut pptt = PPTT::new(*b"CLOUDH", *b"CHPPTT  ", 1);
 
-        let l3_cache_handle = if l3_cache_size != 0 {
+        let (expose_l2, expose_l3) = Self::pptt_cache_exposure(l2_cache_shared, l3_cache_shared);
+
+        let l3_cache_handle = if l3_cache_size != 0 && expose_l3 {
             let l3_cache_node = CacheNodeBuilder::default()
                 .cache_type(CacheType::Unified)
                 .sets(l3_cache_sets)
@@ -2021,7 +2032,7 @@ impl CpuManager {
             None
         };
 
-        let l2_cache_handle = if l2_cache_size != 0 {
+        let l2_cache_handle = if l2_cache_size != 0 && expose_l2 {
             let l2_cache_node = CacheNodeBuilder::default()
                 .cache_type(CacheType::Unified)
                 .sets(l2_cache_sets)
@@ -3728,5 +3739,25 @@ mod unit_tests {
 
         let state = vcpu.get_mp_state().unwrap();
         vcpu.set_mp_state(state).unwrap();
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod pptt_cache_exposure_tests {
+    use super::CpuManager;
+
+    #[test]
+    fn private_l2_shared_l3_is_representable() {
+        assert_eq!(CpuManager::pptt_cache_exposure(false, true), (true, true));
+    }
+
+    #[test]
+    fn shared_l2_omits_l2_and_l3() {
+        assert_eq!(CpuManager::pptt_cache_exposure(true, true), (false, false));
+    }
+
+    #[test]
+    fn private_l3_is_not_exposed_at_package_level() {
+        assert_eq!(CpuManager::pptt_cache_exposure(false, false), (true, false));
     }
 }
