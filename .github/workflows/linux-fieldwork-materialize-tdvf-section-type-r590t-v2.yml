@@ -17,6 +17,7 @@ jobs:
       BASE_SHA: 1af93ac7035cda77cd87b0c18b1134ebb0928052
       SOURCE_HEAD: 19fa932e1faa1f05c588813484f1750b9dd41161
       TARGET_BRANCH: linux-fieldwork/review-tdvf-section-type-r590t
+      ARCH_FEATURES: tdx,kvm,hypervisor/tdx
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,7 +58,7 @@ jobs:
       - name: Compile and list TDVF tests
         run: |
           set +e
-          cargo test --locked -p arch --features tdx,kvm --lib -- --list > /tmp/tdvf-tests.txt 2>&1
+          cargo test --locked -p arch --features "$ARCH_FEATURES" --lib -- --list > /tmp/tdvf-tests.txt 2>&1
           rc=$?
           set -e
           cat /tmp/tdvf-tests.txt
@@ -69,15 +70,15 @@ jobs:
           grep -F 'tdvf_unknown_section_type_is_rejected' /tmp/tdvf-tests.txt
           grep -F 'tdvf_known_and_reserved_section_types_are_validated' /tmp/tdvf-tests.txt
       - name: Prove unknown type rejection
-        run: cargo test --locked -p arch --features tdx,kvm --lib tdvf_unknown_section_type_is_rejected -- --nocapture
+        run: cargo test --locked -p arch --features "$ARCH_FEATURES" --lib tdvf_unknown_section_type_is_rejected -- --nocapture
       - name: Prove exact represented type mapping
-        run: cargo test --locked -p arch --features tdx,kvm --lib tdvf_known_and_reserved_section_types_are_validated -- --nocapture
+        run: cargo test --locked -p arch --features "$ARCH_FEATURES" --lib tdvf_known_and_reserved_section_types_are_validated -- --nocapture
       - name: Run broad TDVF gates
         run: |
           set -euo pipefail
-          cargo test --locked -p arch --features tdx,kvm --lib
+          cargo test --locked -p arch --features "$ARCH_FEATURES" --lib
           cargo test --locked -p hypervisor --features tdx,kvm --lib
-          cargo clippy --locked -p arch --features tdx,kvm --all-targets -- -D warnings
+          cargo clippy --locked -p arch --features "$ARCH_FEATURES" --all-targets -- -D warnings
           cargo fmt --all -- --check
           git diff --check
       - name: Amend one clean source commit
