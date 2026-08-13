@@ -1,0 +1,124 @@
+name: Linux Fieldwork materialize current AArch64 cache error candidate
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/materialize-aarch64-cache-errors-current
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Recover validated historical successor and apply to current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin linux-fieldwork/cache-runtime-errors
+          test "$(git rev-parse FETCH_HEAD)" = "a696e285eaece00335e106acdfb5a651ccb2261f"
+          git show FETCH_HEAD:linux-fieldwork/cache-errors/candidate.patch > /tmp/cache.patch
+          git show FETCH_HEAD:linux-fieldwork/cache-errors/propagation.patch > /tmp/propagation.patch
+
+          git checkout --detach 1af93ac7035cda77cd87b0c18b1134ebb0928052
+          test "$(git rev-parse HEAD:arch/src/aarch64/cache.rs)" = "9200c59627beba0e6366b5105d2fe51a312efaed"
+          test "$(git rev-parse HEAD:arch/src/aarch64/fdt.rs)" = "887d9edfe02056ab2567e4252fb6172236e1f770"
+          test "$(git rev-parse HEAD:arch/src/aarch64/mod.rs)" = "c53e4829b48c2bcd294642f86e501a6b85dfe680"
+          test "$(git rev-parse HEAD:vmm/src/acpi.rs)" = "882aad30f09384121c687f30f2aaaa04248669bf"
+          test "$(git rev-parse HEAD:vmm/src/cpu.rs)" = "6161af9a92dbf842f35fa9f64110d983506e8755"
+
+          git apply --check /tmp/cache.patch
+          git apply /tmp/cache.patch
+          git apply --check --exclude=vmm/src/cpu.rs /tmp/propagation.patch
+          git apply --exclude=vmm/src/cpu.rs /tmp/propagation.patch
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("vmm/src/cpu.rs")
+          s = p.read_text()
+
+          anchor = '''    #[cfg(target_arch = "aarch64")]
+    #[error("Error initialising GICR base address")]
+    VcpuSetGicrBaseAddr(#[source] hypervisor::HypervisorCpuError),
+'''
+          replacement = anchor + '''
+    #[cfg(target_arch = "aarch64")]
+    #[error("Failed to read cache topology")]
+    CacheTopology(#[source] arch::aarch64::cache::Error),
+'''
+          if s.count(anchor) != 1:
+              raise SystemExit("cpu error anchor drifted")
+          s = s.replace(anchor, replacement, 1)
+
+          old = '''    #[cfg(target_arch = "aarch64")]
+    pub fn create_pptt(&self) -> PPTT {'''
+          new = '''    #[cfg(target_arch = "aarch64")]
+    pub fn create_pptt(&self) -> Result<PPTT> {'''
+          if s.count(old) != 1:
+              raise SystemExit("create_pptt signature drifted")
+          s = s.replace(old, new, 1)
+
+          old = '        let cache_info = read_cache_topology();'
+          new = '        let cache_info = read_cache_topology().map_err(Error::CacheTopology)?;'
+          if s.count(old) != 1:
+              raise SystemExit("cache read anchor drifted")
+          s = s.replace(old, new, 1)
+
+          old = '''        pptt
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]'''
+          new = '''        Ok(pptt)
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]'''
+          if s.count(old) != 1:
+              raise SystemExit("pptt return anchor drifted")
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          git diff --check
+          cargo fmt --all -- --check
+
+      - name: Validate AArch64 cache semantics and backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'
+          cargo test --locked -p arch --target aarch64-unknown-linux-gnu --features kvm aarch64::cache::tests
+          cargo check --locked -p vmm --target aarch64-unknown-linux-gnu --features kvm
+          cargo check --locked -p vmm --target aarch64-unknown-linux-gnu --features mshv
+
+      - name: Cross-check x86 and source hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p vmm --features kvm
+          cargo clippy --locked -p vmm --features kvm --lib -- -D warnings
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --name-only | sort > /tmp/files
+          printf '%s\n' arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs vmm/src/acpi.rs vmm/src/cpu.rs | sort > /tmp/expected
+          cmp /tmp/files /tmp/expected
+
+      - name: Publish clean source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git add arch/src/aarch64/cache.rs arch/src/aarch64/fdt.rs arch/src/aarch64/mod.rs vmm/src/acpi.rs vmm/src/cpu.rs
+          git commit -s -m 'aarch64: propagate cache topology discovery errors' -m 'Cache sysfs geometry may be absent, but malformed present values and I/O failures must not panic the VMM. Make cache discovery fallible, preserve the existing missing-data fallback, and carry discovery errors through both FDT and PPTT/ACPI construction.'
+          test "$(git rev-parse HEAD^)" = "1af93ac7035cda77cd87b0c18b1134ebb0928052"
+          git push origin +HEAD:refs/heads/linux-fieldwork/aarch64-cache-errors-current-source
