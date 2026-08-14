@@ -1,0 +1,133 @@
+name: Linux Fieldwork QCOW review follow-up
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/qcow-l2-review-followup-r609
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply review follow-up
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("block/src/formats/qcow/metadata.rs")
+          text = path.read_text()
+
+          old_comment = "                // Allocate and own the new L2 table before publishing it through L1."
+          new_comment = "                // Set the new L2 table's refcount to 1 before the L1 entry points at it."
+          assert text.count(old_comment) == 1
+          text = text.replace(old_comment, new_comment)
+
+          old_expect = '            .expect("reopen should retain at least one reusable cluster");'
+          new_expect = '            .expect("allocator should return a cluster other than live_l2");'
+          assert text.count(old_expect) == 1
+          text = text.replace(old_expect, new_expect)
+
+          anchor = "    #[test]\n    fn zero_marker_fresh_l2_keeps_refcount_owner() {"
+          assert text.count(anchor) == 1
+          success_test = r'''    #[test]
+    fn successful_l2_relocation_releases_old_table() {
+        let cluster_size: u64 = 1 << 16;
+        let temp = super::super::QcowTempDisk::new(64 * cluster_size, None, false, true, false)
+            .unwrap()
+            .into_tempfile();
+        let raw = crate::AlignedFile::new(temp.as_file().try_clone().unwrap(), false);
+        let (mut inner, _backing, _sparse) =
+            super::super::parser::parse_qcow(raw, 0, true).unwrap();
+
+        inner.map_write(0, None).expect("initial write");
+        inner.sync_caches().expect("make the current L2 clean");
+        let old_l2 = inner.l1_table[0];
+        assert_ne!(old_l2, 0);
+
+        inner
+            .map_write(cluster_size, None)
+            .expect("relocate clean L2");
+        let relocated_l2 = inner.l1_table[0];
+        assert_ne!(relocated_l2, 0);
+        assert_ne!(relocated_l2, old_l2);
+
+        let (old_refcount, relocated_refcount) = {
+            let super::QcowState {
+                refcounts,
+                raw_file,
+                ..
+            } = &mut inner;
+            (
+                refcounts.get_cluster_refcount(raw_file, old_l2).unwrap(),
+                refcounts
+                    .get_cluster_refcount(raw_file, relocated_l2)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            old_refcount, 0,
+            "successful relocation must release the old L2 refcount"
+        );
+        assert_eq!(
+            relocated_refcount, 1,
+            "successful relocation must retain ownership for the replacement L2"
+        );
+        assert!(
+            inner.unref_clusters.contains(&old_l2),
+            "the released old L2 must wait for metadata flush before reuse"
+        );
+        assert!(
+            !inner.avail_clusters.contains(&old_l2),
+            "the old L2 must not be reusable before metadata flush"
+        );
+        assert!(
+            !inner.unref_clusters.contains(&relocated_l2)
+                && !inner.avail_clusters.contains(&relocated_l2),
+            "the replacement L2 must stay off the free lists"
+        );
+
+        let metadata = super::QcowMetadata::new(inner);
+        metadata.flush().expect("publish the released old L2");
+        let inner = metadata.inner.read().unwrap();
+        assert!(
+            inner.avail_clusters.contains(&old_l2),
+            "metadata flush must make the released old L2 reusable"
+        );
+        assert!(
+            !inner.avail_clusters.contains(&relocated_l2),
+            "metadata flush must keep the replacement L2 allocated"
+        );
+    }
+
+'''
+          text = text.replace(anchor, success_test + anchor)
+          path.write_text(text)
+          PY
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Run block tests
+        run: cargo test --locked -p block
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit tested source follow-up
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add block/src/formats/qcow/metadata.rs
+          git diff --cached --quiet && exit 0
+          git commit -m "fieldwork: apply QCOW review follow-up"
+          git push origin HEAD:linux-fieldwork/qcow-l2-review-followup-r609
