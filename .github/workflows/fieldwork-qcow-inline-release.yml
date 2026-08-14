@@ -1,0 +1,125 @@
+name: Fieldwork QCOW inline old L2 release
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/qcow-l2-inline-release-r609
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply focused review follow-up
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('block/src/formats/qcow/metadata.rs')
+          text = path.read_text()
+
+          old = '''        let mut deferred_unrefs = Vec::new();
+
+        self.cache_l2_cluster_alloc(l1_index, l2_addr_disk)?;
+'''
+          new = '''        self.cache_l2_cluster_alloc(l1_index, l2_addr_disk)?;
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          text = text.replace(
+              'self.update_cluster_addr(l1_index, l2_index, cluster_addr, &mut deferred_unrefs)?;',
+              'self.update_cluster_addr(l1_index, l2_index, cluster_addr)?;',
+          )
+
+          old = '''        // Apply deferred L2 releases
+        for addr in deferred_unrefs {
+            self.set_cluster_refcount_track_freed(addr, 0)?;
+        }
+
+'''
+          assert old in text
+          text = text.replace(old, '', 1)
+
+          start = text.index('    fn update_cluster_addr(\n')
+          end = text.index('\n    /// Resizes the image', start)
+          replacement = '''    fn update_cluster_addr(
+        &mut self,
+        l1_index: usize,
+        l2_index: usize,
+        cluster_addr: u64,
+    ) -> io::Result<()> {
+        let old_l2 = if !self.l2_cache.get(l1_index).unwrap().dirty() {
+            // Allocate the new cluster for the relocated L2 table before
+            // releasing the old one: if this allocation fails (ENOSPC at
+            // allocator exhaustion) the old table must stay off the free
+            // lists, or a later allocation would hand it out and overwrite a
+            // live L2 table (issue #8606). The cluster will be written when
+            // the cache is flushed.
+            let new_addr = self.get_new_cluster(None)?;
+            self.set_cluster_refcount_track_freed(new_addr, 1)?;
+
+            let old_l2 = self.l1_table[l1_index];
+            self.l1_table[l1_index] = new_addr; // marks l1_table dirty via IndexMut
+            Some(old_l2)
+        } else {
+            None
+        };
+
+        // Write the L2 entry before the fallible old-table release so an
+        // error after the L1 switch still leaves the replacement dirty and
+        // ready for sync_caches() to publish on clean shutdown.
+        self.l2_cache.get_mut(l1_index).unwrap()[l2_index] = l2_entry_make_std(cluster_addr);
+
+        if let Some(old_l2) = old_l2
+            && old_l2 != 0
+        {
+            self.set_cluster_refcount_track_freed(old_l2, 0)?;
+            self.unref_clusters.push(old_l2);
+        }
+        Ok(())
+    }
+'''
+          text = text[:start] + replacement + text[end:]
+
+          test_start = text.index(
+              '    #[test]\n    fn relocated_l2_dropped_deferred_updates_keeps_refcount_owner() {'
+          )
+          test_end = text.index(
+              '    #[test]\n    fn successful_l2_relocation_releases_old_table() {',
+              test_start,
+          )
+          text = text[:test_start] + text[test_end:]
+
+          assert 'deferred_unrefs' not in text
+          path.write_text(text)
+          PY
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Diff check
+        run: git diff --check
+
+      - name: Test block crate
+        run: cargo test --locked -p block
+
+      - name: Test block crate with io_uring
+        run: cargo test --locked -p block --features io_uring
+
+      - name: Commit source-only follow-up
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add block/src/formats/qcow/metadata.rs
+          git commit -m 'fieldwork: inline old L2 release'
+          git push origin HEAD:linux-fieldwork/qcow-l2-inline-release-r609
