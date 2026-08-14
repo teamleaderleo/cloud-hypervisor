@@ -1,0 +1,17 @@
+name: Linux Fieldwork QCOW review io_uring validation
+
+on:
+  push:
+    branches:
+      - linux-fieldwork/qcow-l2-review-followup-r609
+
+permissions:
+  contents: read
+
+jobs:
+  block-io-uring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run block io_uring tests
+        run: cargo test --locked -p block --features io_uring
