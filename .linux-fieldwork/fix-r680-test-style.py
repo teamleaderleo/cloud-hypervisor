@@ -17,7 +17,7 @@ imports = '\n'.join([
     '        COMMAND_REG, COMMAND_REG_MEMORY_SPACE_MASK, PciBarConfiguration,',
     '        PciBarPrefetchable,',
     '    };',
-    '    use crate::device::DeviceRelocationError;',
+    '    use crate::DeviceRelocationError;',
     '',
 ])
 unit = unit.replace(marker, marker + imports, 1)
