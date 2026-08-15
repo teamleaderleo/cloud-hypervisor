@@ -1,0 +1,213 @@
+name: PCI BAR late-error rollback contract probe
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-late-error-contract
+  workflow_dispatch:
+
+jobs:
+  late-error-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- pci/src/bus.rs)"
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+
+      - name: Inject late-error caller-contract discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('pci/src/bus.rs')
+          text = path.read_text()
+          end = text.rfind('\n}')
+          if end < text.index('#[cfg(test)]\nmod unit_tests'):
+              raise SystemExit('unit test terminator missing')
+          lines = [
+              '',
+              '    struct FieldworkBarDevice {',
+              '        configuration: PciConfiguration,',
+              '    }',
+              '',
+              '    impl FieldworkBarDevice {',
+              '        fn new(base: u64) -> Self {',
+              '            let mut configuration = PciConfiguration::new(',
+              '                0x1234,',
+              '                0x5678,',
+              '                0,',
+              '                PciClassCode::BridgeDevice,',
+              '                &PciBridgeSubclass::HostBridge,',
+              '                None,',
+              '                PciHeaderType::Device,',
+              '                0,',
+              '                0,',
+              '                None,',
+              '                None,',
+              '            );',
+              '            configuration',
+              '                .add_pci_bar(',
+              '                    &crate::configuration::PciBarConfiguration::new(',
+              '                        0,',
+              '                        0x1000,',
+              '                        PciBarRegionType::Memory32BitRegion,',
+              '                        crate::configuration::PciBarPrefetchable::NotPrefetchable,',
+              '                    )',
+              '                    .set_address(base),',
+              '                )',
+              '                .unwrap();',
+              '            assert!(',
+              '                configuration',
+              '                    .write_config_register(',
+              '                        crate::configuration::COMMAND_REG,',
+              '                        0,',
+              '                        &crate::configuration::COMMAND_REG_MEMORY_SPACE_MASK',
+              '                            .to_le_bytes(),',
+              '                    )',
+              '                    .is_empty()',
+              '            );',
+              '            Self { configuration }',
+              '        }',
+              '    }',
+              '',
+              '    impl PciDevice for FieldworkBarDevice {',
+              '        fn write_config_register(',
+              '            &mut self,',
+              '            reg_idx: usize,',
+              '            offset: u64,',
+              '            data: &[u8],',
+              '        ) -> (Vec<crate::device::BarReprogrammingParams>, Option<Arc<Barrier>>) {',
+              '            (',
+              '                self.configuration.write_config_register(reg_idx, offset, data),',
+              '                None,',
+              '            )',
+              '        }',
+              '',
+              '        fn read_config_register(&mut self, reg_idx: usize) -> u32 {',
+              '            self.configuration.read_reg(reg_idx)',
+              '        }',
+              '',
+              '        fn restore_bar_addr(&mut self, params: &crate::device::BarReprogrammingParams) {',
+              '            self.configuration.restore_bar_addr(params);',
+              '        }',
+              '',
+              '        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {',
+              '            self',
+              '        }',
+              '',
+              '        fn id(&self) -> Option<String> {',
+              '            None',
+              '        }',
+              '    }',
+              '',
+              '    struct FieldworkLateFailRelocation {',
+              '        mapping: Arc<std::sync::atomic::AtomicU64>,',
+              '    }',
+              '',
+              '    impl DeviceRelocation for FieldworkLateFailRelocation {',
+              '        fn move_bar(',
+              '            &self,',
+              '            _old_base: u64,',
+              '            new_base: u64,',
+              '            _len: u64,',
+              '            _pci_dev: &mut dyn PciDevice,',
+              '            _region_type: PciBarRegionType,',
+              '        ) -> Result<(), io::Error> {',
+              '            self.mapping',
+              '                .store(new_base, std::sync::atomic::Ordering::SeqCst);',
+              '            Err(io::Error::other("injected late relocation failure"))',
+              '        }',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn fieldwork_late_move_error_keeps_config_and_mapping_consistent() {',
+              '        const OLD: u64 = 0x1000_0000;',
+              '        const NEW: u64 = 0x1000_1000;',
+              '        const DEVICE: u8 = 1;',
+              '',
+              '        let mapping = Arc::new(std::sync::atomic::AtomicU64::new(OLD));',
+              '        let relocation = Arc::new(FieldworkLateFailRelocation {',
+              '            mapping: mapping.clone(),',
+              '        });',
+              '        let mut pci_bus = PciBus::new(PciRoot::new(None), relocation);',
+              '        let device = Arc::new(Mutex::new(FieldworkBarDevice::new(OLD)));',
+              '        let bus_device: Arc<Mutex<dyn PciDevice>> = device.clone();',
+              '        pci_bus.add_device(DEVICE, bus_device).unwrap();',
+              '',
+              '        let mut config = PciConfigMmio::new(Arc::new(Mutex::new(pci_bus)));',
+              '        let ecam_bar0 = (u64::from(DEVICE) << 15)',
+              '            | ((crate::configuration::BAR0_REG as u64) << 2);',
+              '        config.write(0, ecam_bar0, &(NEW as u32).to_le_bytes());',
+              '',
+              '        let config_base = device.lock().unwrap().configuration.get_bar_addr(0);',
+              '        let mapped_base = mapping.load(std::sync::atomic::Ordering::SeqCst);',
+              '        assert_eq!(',
+              '            config_base, mapped_base,',
+              '            "caller restored config to OLD after relocation side effects moved to NEW"',
+              '        );',
+              '    }',
+          ]
+          text = text[:end] + '\n'.join(lines) + text[end:]
+          path.write_text(text)
+          PY
+
+      - name: Prove current late-error rollback contract loses
+        shell: bash
+        run: |
+          set -euxo pipefail
+          set +e
+          cargo +1.89.0 test --locked -p pci --lib \
+            fieldwork_late_move_error_keeps_config_and_mapping_consistent \
+            -- --nocapture 2>&1 | tee /tmp/late-error.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "LATE_MOVE_BASELINE_RC=$rc" | tee /tmp/late-error-rc.txt
+          if [ "$rc" -eq 0 ]; then
+            echo 'baseline unexpectedly preserved config/mapping consistency' >&2
+            exit 1
+          fi
+          grep -q 'caller restored config to OLD after relocation side effects moved to NEW' /tmp/late-error.log
+
+      - name: Run ordinary PCI controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git checkout -- pci/src/bus.rs
+          cargo +1.89.0 test --locked -p pci --lib 2>&1 | tee /tmp/pci-controls.log
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/late-error-rc.txt ]; then cat /tmp/late-error-rc.txt; fi
+          } > /tmp/late-error-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-pci-bar-late-error-contract
+          path: |
+            /tmp/late-error.log
+            /tmp/late-error-rc.txt
+            /tmp/pci-controls.log
+            /tmp/late-error-receipt.txt
+          if-no-files-found: warn
