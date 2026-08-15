@@ -1,0 +1,120 @@
+name: Bus stack strong-lifetime revalidation v2
+
+on:
+  push:
+    branches:
+      - research/ch-bus-r677-r678-r679-v2
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bus-v2:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact-current research branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact upstream base
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git merge-base --is-ancestor 69d4c0a82ef15b2660906013bd87ae32668e7998 HEAD
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vm-device/src/bus.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Materialize corrected clean Bus candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 .linux-fieldwork/materialize-bus-v2.py
+          cargo +nightly fmt --all
+          git add vm-device/src/bus.rs
+          git diff --cached --check
+          cp vm-device/src/bus.rs /tmp/bus-v2-product.rs
+          git diff --cached -- vm-device/src/bus.rs > /tmp/bus-v2-product.diff
+          sha256sum /tmp/bus-v2-product.diff | tee /tmp/bus-v2-product.sha256
+
+      - name: Inject deterministic in-flight lifetime discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 .linux-fieldwork/instrument-bus-v2-lifetime.py
+          cargo +nightly fmt --all
+
+      - name: Run lifetime discriminator and Bus controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device --lib update_range_keeps_device_alive_until_move_finishes -- --nocapture 2>&1 | tee /tmp/bus-v2.log
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee -a /tmp/bus-v2.log
+
+      - name: Quality gates with workflow-only discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +stable clippy --locked -p vm-device --all-targets -- -D warnings 2>&1 | tee -a /tmp/bus-v2.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/bus-v2.log
+
+      - name: Restore exact product candidate and verify identity
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp /tmp/bus-v2-product.rs vm-device/src/bus.rs
+          git add vm-device/src/bus.rs
+          git diff --cached --check
+          git diff --cached -- vm-device/src/bus.rs > /tmp/bus-v2-product-final.diff
+          sha256sum /tmp/bus-v2-product-final.diff | tee /tmp/bus-v2-product-final.sha256
+          cmp /tmp/bus-v2-product.diff /tmp/bus-v2-product-final.diff
+
+      - name: Commit tested product candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git commit -s -m 'vm-device: make Bus range updates atomic' -m 'Keep overlap validation and mutation under one write guard, preserve the device lifetime across range moves, and evaluate range endpoints without u64 overflow.' -m 'Assisted-by: ChatGPT:GPT-5.6 Sol'
+          git push origin HEAD:research/ch-bus-r677-r678-r679-v2
+          git rev-parse HEAD | tee /tmp/bus-v2-head.txt
+          git rev-parse HEAD:vm-device/src/bus.rs | tee /tmp/bus-v2-blob.txt
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo 'supersedes_bus_clean=2edcf22f0bd35beff06ab2b4e132cf240e54d2f9'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/bus-v2-product.sha256 ]; then cat /tmp/bus-v2-product.sha256; fi
+            if [ -f /tmp/bus-v2-head.txt ]; then cat /tmp/bus-v2-head.txt; fi
+            if [ -f /tmp/bus-v2-blob.txt ]; then cat /tmp/bus-v2-blob.txt; fi
+            git status --short
+          } > /tmp/bus-v2-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-bus-r677-r678-r679-v2
+          path: |
+            /tmp/bus-v2-product.diff
+            /tmp/bus-v2-product.sha256
+            /tmp/bus-v2-product-final.diff
+            /tmp/bus-v2-product-final.sha256
+            /tmp/bus-v2.log
+            /tmp/bus-v2-head.txt
+            /tmp/bus-v2-blob.txt
+            /tmp/bus-v2-receipt.txt
+          if-no-files-found: warn
