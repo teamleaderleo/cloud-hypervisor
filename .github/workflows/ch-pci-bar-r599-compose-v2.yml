@@ -1,0 +1,117 @@
+name: PCI BAR reuse composition v2
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-compose-v2
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compose-v2:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out corrected Bus base
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact corrected base
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "d0ed124cc80e9d22c60cdc19adb3f935517fb9e3"
+          test "$(git rev-parse HEAD:vm-device/src/bus.rs)" = "4e127584f680cde2af56f8d7f1c531368c1c2f4b"
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Reuse exact previously tested VMM product blob
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git show origin/review/ch-pci-bar-r599-clean:vmm/src/device_manager.rs > vmm/src/device_manager.rs
+          test "$(git hash-object vmm/src/device_manager.rs)" = "3bd07c6e65c5c487bda28298e1a6aa6c251a27d7"
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-compose-v2.diff
+          sha256sum /tmp/r599-compose-v2.diff | tee /tmp/r599-compose-v2.sha256
+
+      - name: Run corrected Bus suite
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee /tmp/r599-compose-v2.log
+
+      - name: Run VMM lifecycle controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib mmio_bar_reservation -- --nocapture 2>&1 | tee -a /tmp/r599-compose-v2.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib ioevent_move -- --nocapture 2>&1 | tee -a /tmp/r599-compose-v2.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r599-compose-v2.log
+
+      - name: Compile complete KVM-flavoured VMM tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run 2>&1 | tee -a /tmp/r599-compose-v2.log
+
+      - name: Project quality gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +stable clippy --locked --all --all-targets --no-default-features --tests --examples --features kvm -- -D warnings 2>&1 | tee -a /tmp/r599-compose-v2.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-compose-v2.log
+          git diff --cached --check
+
+      - name: Commit tested VMM candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git commit -s \
+            -m 'vmm: Delay MMIO BAR reuse until relocation completes' \
+            -m 'Reserve the replacement MMIO BAR before publishing the old address as free. Move virtio config-BAR ioevents transactionally so primary registration failures restore the old registration set.' \
+            -m 'Assisted-by: ChatGPT:GPT-5.6 Sol'
+          git push origin HEAD:research/ch-pci-bar-r599-compose-v2
+          git rev-parse HEAD | tee /tmp/r599-compose-v2-head.txt
+          git rev-parse HEAD:vmm/src/device_manager.rs | tee /tmp/r599-compose-v2-vmm-blob.txt
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo 'corrected_bus_base=d0ed124cc80e9d22c60cdc19adb3f935517fb9e3'
+            echo 'vmm_blob=3bd07c6e65c5c487bda28298e1a6aa6c251a27d7'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-compose-v2.sha256 ]; then cat /tmp/r599-compose-v2.sha256; fi
+            if [ -f /tmp/r599-compose-v2-head.txt ]; then cat /tmp/r599-compose-v2-head.txt; fi
+            git status --short
+          } > /tmp/r599-compose-v2-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-compose-v2
+          path: |
+            /tmp/r599-compose-v2.diff
+            /tmp/r599-compose-v2.sha256
+            /tmp/r599-compose-v2.log
+            /tmp/r599-compose-v2-head.txt
+            /tmp/r599-compose-v2-vmm-blob.txt
+            /tmp/r599-compose-v2-receipt.txt
+          if-no-files-found: warn
