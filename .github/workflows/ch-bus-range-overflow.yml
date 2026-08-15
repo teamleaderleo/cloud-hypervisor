@@ -1,0 +1,140 @@
+name: BusRange overflow probe
+
+on:
+  push:
+    branches:
+      - research/ch-bus-range-overflow-current
+  workflow_dispatch:
+
+jobs:
+  bus-range-overflow:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Inject high-address overlap discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          marker = "\n}\n"
+          pos = text.rfind(marker)
+          if pos < 0:
+              raise SystemExit("unit test module terminator not found")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn bus_range_overlap_handles_high_address_endpoints() {",
+              "        let high = BusRange {",
+              "            base: u64::MAX - 0x10,",
+              "            len: 0x20,",
+              "        };",
+              "",
+              "        assert!(high.overlaps(u64::MAX - 8, 4));",
+              "        assert!(!high.overlaps(0x1000, 0x100));",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
+          PY
+
+      - name: Prove current endpoint arithmetic overflows
+        shell: bash
+        run: |
+          set -euxo pipefail
+          set +e
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            bus_range_overlap_handles_high_address_endpoints \
+            -- --nocapture 2>&1 | tee /tmp/range-baseline.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "BUS_RANGE_BASELINE_RC=$rc" | tee /tmp/range-baseline-rc.txt
+          if [ "$rc" -eq 0 ]; then
+            echo "baseline unexpectedly handled high-address endpoint arithmetic" >&2
+            exit 1
+          fi
+          grep -q "attempt to add with overflow" /tmp/range-baseline.log
+
+      - name: Materialize widened-endpoint candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          old = "        self.base < (base + len) && base < self.base + self.len\n"
+          new = "        (self.base as u128) < (base as u128 + len as u128)\n            && (base as u128) < (self.base as u128 + self.len as u128)\n"
+          if old not in text:
+              raise SystemExit("BusRange::overlaps body changed")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          cargo +nightly fmt --all
+          git add vm-device/src/bus.rs
+          git diff --cached --check
+          git diff --cached -- vm-device/src/bus.rs > /tmp/range-candidate.diff
+          sha256sum /tmp/range-candidate.diff | tee /tmp/range-candidate.sha256
+
+      - name: Run focused candidate and controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : > /tmp/range-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            bus_range_overlap_handles_high_address_endpoints \
+            -- --nocapture 2>&1 | tee -a /tmp/range-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_range_overlap -- --nocapture \
+            2>&1 | tee -a /tmp/range-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_insert -- --nocapture \
+            2>&1 | tee -a /tmp/range-candidate.log
+
+      - name: Full vm-device gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee -a /tmp/range-candidate.log
+          cargo +1.89.0 clippy --locked -p vm-device --all-targets -- -D warnings 2>&1 | tee -a /tmp/range-candidate.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/range-candidate.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998"
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/range-baseline-rc.txt ]; then cat /tmp/range-baseline-rc.txt; fi
+            if [ -f /tmp/range-candidate.sha256 ]; then cat /tmp/range-candidate.sha256; fi
+            git status --short
+          } > /tmp/range-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-bus-range-overflow
+          path: |
+            /tmp/range-baseline.log
+            /tmp/range-baseline-rc.txt
+            /tmp/range-candidate.diff
+            /tmp/range-candidate.sha256
+            /tmp/range-candidate.log
+            /tmp/range-receipt.txt
+          if-no-files-found: warn
