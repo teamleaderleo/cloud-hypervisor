@@ -6,6 +6,9 @@ on:
       - research/ch-pci-bar-r599-lease-guard
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   lease-guard:
     runs-on: ubuntu-24.04
@@ -306,15 +309,16 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cargo +1.89.0 test --locked -p vmm --lib mmio_bar_relocation_lease -- --nocapture \
-            2>&1 | tee /tmp/r599-lease.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib \
+            mmio_bar_relocation_lease -- --nocapture 2>&1 | tee /tmp/r599-lease.log
 
       - name: Run full vmm gates
         shell: bash
         run: |
           set -euxo pipefail
-          cargo +1.89.0 test --locked -p vmm 2>&1 | tee -a /tmp/r599-lease.log
-          cargo +1.89.0 clippy --locked -p vmm --all-targets -- -D warnings \
+          cargo +1.89.0 test --locked -p vmm --features kvm \
+            2>&1 | tee -a /tmp/r599-lease.log
+          cargo +1.89.0 clippy --locked -p vmm --features kvm --all-targets -- -D warnings \
             2>&1 | tee -a /tmp/r599-lease.log
           cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-lease.log
           git diff --cached --check
