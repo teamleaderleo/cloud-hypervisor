@@ -1,0 +1,136 @@
+name: PCI BAR new-first hosted validation v2
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-new-first
+  workflow_dispatch:
+
+jobs:
+  hosted-validation:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact-current research branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify pristine product source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs pci/src/configuration.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Reuse exact new-first materializer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/ch-pci-bar-r599-new-first.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if line.strip() == "python3 - <<'PY'") + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          body = workflow[start:end]
+          indent = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+          Path('/tmp/materialize.py').write_text('\n'.join(line[indent:] for line in body) + '\n')
+          PY
+          python3 /tmp/materialize.py
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('vmm/src/device_manager.rs')
+          text = path.read_text()
+
+          def edit_test(text, name, edits):
+              start = text.index('    fn ' + name + '() {')
+              next_test = text.find('\n    #[test]', start + 1)
+              end = next_test if next_test >= 0 else text.rfind('\n}')
+              section = text[start:end]
+              for old, new in edits:
+                  if old not in section:
+                      raise SystemExit(name + ': fixture text missing: ' + old.strip())
+                  section = section.replace(old, new, 1)
+              return text[:start] + section + text[end:]
+
+          text = edit_test(
+              text,
+              'mmio_bar_reservation_error_quarantines_old_and_new',
+              [
+                  ('        let reservation = MmioBarRelocationReservation::new(', '        let _reservation = MmioBarRelocationReservation::new('),
+                  ('        drop(reservation);\n', ''),
+              ],
+          )
+          text = edit_test(
+              text,
+              'mmio_bar_reservation_does_not_hold_allocator_mutex',
+              [
+                  ('        let reservation = MmioBarRelocationReservation::new(', '        let _reservation = MmioBarRelocationReservation::new('),
+                  ('        assert!(allocator.try_lock().is_ok());\n', '        allocator.try_lock().unwrap();\n'),
+                  ('        drop(reservation);\n', ''),
+              ],
+          )
+          path.write_text(text)
+          PY
+
+          cargo +nightly fmt --all
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-new-first-hosted.diff
+          sha256sum /tmp/r599-new-first-hosted.diff | tee /tmp/r599-new-first-hosted.sha256
+
+      - name: Run focused and device-manager tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib mmio_bar_reservation -- --nocapture 2>&1 | tee /tmp/r599-new-first-hosted.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r599-new-first-hosted.log
+
+      - name: Compile complete KVM-flavoured vmm tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run 2>&1 | tee -a /tmp/r599-new-first-hosted.log
+
+      - name: Run project KVM Clippy shape
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 clippy --locked --all --all-targets --no-default-features --tests --examples --features kvm -- -D warnings 2>&1 | tee -a /tmp/r599-new-first-hosted.log
+
+      - name: Formatting and diff checks
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-new-first-hosted.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-new-first-hosted.sha256 ]; then cat /tmp/r599-new-first-hosted.sha256; fi
+            git status --short
+          } > /tmp/r599-new-first-hosted-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-new-first-hosted-v2
+          path: |
+            /tmp/r599-new-first-hosted.diff
+            /tmp/r599-new-first-hosted.sha256
+            /tmp/r599-new-first-hosted.log
+            /tmp/r599-new-first-hosted-receipt.txt
+          if-no-files-found: warn
