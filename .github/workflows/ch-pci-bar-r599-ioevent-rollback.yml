@@ -1,0 +1,336 @@
+name: PCI BAR ioevent rollback probe
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-ioevent-rollback
+  workflow_dispatch:
+
+jobs:
+  ioevent-rollback:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Materialize transactional ioevent helper
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('vmm/src/device_manager.rs')
+          text = path.read_text()
+          marker = 'pub(crate) struct AddressManager {'
+          if marker not in text:
+              raise SystemExit('AddressManager marker missing')
+
+          helper = '\n'.join([
+              '#[derive(Clone, Copy)]',
+              'enum IoEventUpdate {',
+              '    Register,',
+              '    Unregister,',
+              '}',
+              '',
+              "fn rollback_ioevent_move<'a, F>(",
+              "    apply: &mut F,",
+              "    added_new: &[(&'a EventFd, u64)],",
+              "    removed_old: &[(&'a EventFd, u64)],",
+              ') -> Option<io::Error>',
+              'where',
+              "    F: FnMut(IoEventUpdate, &'a EventFd, u64) -> io::Result<()>,",
+              '{',
+              '    let mut first_error = None;',
+              '',
+              '    for &(event, addr) in added_new.iter().rev() {',
+              '        if let Err(error) = apply(IoEventUpdate::Unregister, event, addr)',
+              '            && first_error.is_none()',
+              '        {',
+              '            first_error = Some(error);',
+              '        }',
+              '    }',
+              '',
+              '    for &(event, addr) in removed_old {',
+              '        if let Err(error) = apply(IoEventUpdate::Register, event, addr)',
+              '            && first_error.is_none()',
+              '        {',
+              '            first_error = Some(error);',
+              '        }',
+              '    }',
+              '',
+              '    first_error',
+              '}',
+              '',
+              "fn move_ioeventfds<'a, Old, New, F>(old_events: Old, new_events: New, mut apply: F) -> io::Result<()>",
+              'where',
+              "    Old: IntoIterator<Item = (&'a EventFd, u64)>,",
+              "    New: IntoIterator<Item = (&'a EventFd, u64)>,",
+              "    F: FnMut(IoEventUpdate, &'a EventFd, u64) -> io::Result<()>,",
+              '{',
+              '    let old_events: Vec<_> = old_events.into_iter().collect();',
+              '    let new_events: Vec<_> = new_events.into_iter().collect();',
+              '    let mut removed_old = Vec::new();',
+              '',
+              '    for &(event, addr) in &old_events {',
+              '        if let Err(error) = apply(IoEventUpdate::Unregister, event, addr) {',
+              '            if let Some(rollback) =',
+              '                rollback_ioevent_move(&mut apply, &[], &removed_old)',
+              '            {',
+              '                return Err(io::Error::other(format!(',
+              '                    "failed moving ioevents: {error}; rollback failed: {rollback}"',
+              '                )));',
+              '            }',
+              '            return Err(error);',
+              '        }',
+              '        removed_old.push((event, addr));',
+              '    }',
+              '',
+              '    let mut added_new = Vec::new();',
+              '    for &(event, addr) in &new_events {',
+              '        if let Err(error) = apply(IoEventUpdate::Register, event, addr) {',
+              '            if let Some(rollback) =',
+              '                rollback_ioevent_move(&mut apply, &added_new, &removed_old)',
+              '            {',
+              '                return Err(io::Error::other(format!(',
+              '                    "failed moving ioevents: {error}; rollback failed: {rollback}"',
+              '                )));',
+              '            }',
+              '            return Err(error);',
+              '        }',
+              '        added_new.push((event, addr));',
+              '    }',
+              '',
+              '    Ok(())',
+              '}',
+              '',
+          ])
+          text = text.replace(marker, helper + marker, 1)
+
+          old = '\n'.join([
+              '                for (event, addr) in virtio_pci_dev.ioeventfds(old_base) {',
+              '                    let io_addr = IoEventAddress::Mmio(addr);',
+              '                    self.vm.unregister_ioevent(event, &io_addr).map_err(|e| {',
+              '                        io::Error::other(format!("failed to unregister ioevent: {e:?}"))',
+              '                    })?;',
+              '                }',
+              '                for (event, addr) in virtio_pci_dev.ioeventfds(new_base) {',
+              '                    let io_addr = IoEventAddress::Mmio(addr);',
+              '                    self.vm',
+              '                        .register_ioevent(event, &io_addr, None)',
+              '                        .map_err(|e| {',
+              '                            io::Error::other(format!("failed to register ioevent: {e:?}"))',
+              '                        })?;',
+              '                }',
+          ])
+          new = '\n'.join([
+              '                move_ioeventfds(',
+              '                    virtio_pci_dev.ioeventfds(old_base),',
+              '                    virtio_pci_dev.ioeventfds(new_base),',
+              '                    |update, event, addr| {',
+              '                        let io_addr = IoEventAddress::Mmio(addr);',
+              '                        match update {',
+              '                            IoEventUpdate::Register => self',
+              '                                .vm',
+              '                                .register_ioevent(event, &io_addr, None)',
+              '                                .map_err(|e| {',
+              '                                    io::Error::other(format!(',
+              '                                        "failed to register ioevent: {e:?}"',
+              '                                    ))',
+              '                                }),',
+              '                            IoEventUpdate::Unregister => self',
+              '                                .vm',
+              '                                .unregister_ioevent(event, &io_addr)',
+              '                                .map_err(|e| {',
+              '                                    io::Error::other(format!(',
+              '                                        "failed to unregister ioevent: {e:?}"',
+              '                                    ))',
+              '                                }),',
+              '                        }',
+              '                    },',
+              '                )?;',
+          ])
+          if old not in text:
+              raise SystemExit('virtio ioevent loop shape changed')
+          text = text.replace(old, new, 1)
+
+          unit_pos = text.index('#[cfg(test)]\nmod unit_tests')
+          end = text.rfind('\n}')
+          if end < unit_pos:
+              raise SystemExit('unit test module terminator missing')
+
+          tests = '\n'.join([
+              '',
+              '    fn synthetic_ioevent_state(',
+              '        events: &[(&EventFd, u64)],',
+              '    ) -> std::collections::HashSet<(i32, u64)> {',
+              '        events',
+              '            .iter()',
+              '            .map(|(event, addr)| (event.as_raw_fd(), *addr))',
+              '            .collect()',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn ioevent_move_restores_old_for_every_primary_failure() {',
+              '        let first = EventFd::new(libc::EFD_NONBLOCK).unwrap();',
+              '        let second = EventFd::new(libc::EFD_NONBLOCK).unwrap();',
+              '        let old = [(&first, 0x1000), (&second, 0x1100)];',
+              '        let new = [(&first, 0x2000), (&second, 0x2100)];',
+              '        let old_state = synthetic_ioevent_state(&old);',
+              '',
+              '        for fail_at in 0..(old.len() + new.len()) {',
+              '            let mut state = old_state.clone();',
+              '            let mut call = 0usize;',
+              '            let result = move_ioeventfds(',
+              '                old.iter().copied(),',
+              '                new.iter().copied(),',
+              '                |update, event, addr| {',
+              '                    let current = call;',
+              '                    call += 1;',
+              '                    if current == fail_at {',
+              '                        return Err(io::Error::other("injected primary failure"));',
+              '                    }',
+              '',
+              '                    let key = (event.as_raw_fd(), addr);',
+              '                    match update {',
+              '                        IoEventUpdate::Register if state.insert(key) => Ok(()),',
+              '                        IoEventUpdate::Unregister if state.remove(&key) => Ok(()),',
+              '                        _ => Err(io::Error::other("synthetic registry mismatch")),',
+              '                    }',
+              '                },',
+              '            );',
+              '',
+              '            assert!(result.is_err());',
+              '            assert_eq!(state, old_state, "failure at operation {fail_at}");',
+              '        }',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn ioevent_move_success_publishes_only_new() {',
+              '        let first = EventFd::new(libc::EFD_NONBLOCK).unwrap();',
+              '        let second = EventFd::new(libc::EFD_NONBLOCK).unwrap();',
+              '        let old = [(&first, 0x1000), (&second, 0x1100)];',
+              '        let new = [(&first, 0x2000), (&second, 0x2100)];',
+              '        let mut state = synthetic_ioevent_state(&old);',
+              '',
+              '        move_ioeventfds(',
+              '            old.iter().copied(),',
+              '            new.iter().copied(),',
+              '            |update, event, addr| {',
+              '                let key = (event.as_raw_fd(), addr);',
+              '                match update {',
+              '                    IoEventUpdate::Register if state.insert(key) => Ok(()),',
+              '                    IoEventUpdate::Unregister if state.remove(&key) => Ok(()),',
+              '                    _ => Err(io::Error::other("synthetic registry mismatch")),',
+              '                }',
+              '            },',
+              '        )',
+              '        .unwrap();',
+              '',
+              '        assert_eq!(state, synthetic_ioevent_state(&new));',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn ioevent_move_reports_rollback_failure() {',
+              '        let first = EventFd::new(libc::EFD_NONBLOCK).unwrap();',
+              '        let second = EventFd::new(libc::EFD_NONBLOCK).unwrap();',
+              '        let old = [(&first, 0x1000), (&second, 0x1100)];',
+              '        let new = [(&first, 0x2000), (&second, 0x2100)];',
+              '        let old_state = synthetic_ioevent_state(&old);',
+              '        let mut state = old_state.clone();',
+              '        let mut call = 0usize;',
+              '',
+              '        let error = move_ioeventfds(',
+              '            old.iter().copied(),',
+              '            new.iter().copied(),',
+              '            |update, event, addr| {',
+              '                let current = call;',
+              '                call += 1;',
+              '                if current == 2 || current == 3 {',
+              '                    return Err(io::Error::other("injected failure"));',
+              '                }',
+              '',
+              '                let key = (event.as_raw_fd(), addr);',
+              '                match update {',
+              '                    IoEventUpdate::Register if state.insert(key) => Ok(()),',
+              '                    IoEventUpdate::Unregister if state.remove(&key) => Ok(()),',
+              '                    _ => Err(io::Error::other("synthetic registry mismatch")),',
+              '                }',
+              '            },',
+              '        )',
+              '        .unwrap_err();',
+              '',
+              '        assert!(error.to_string().contains("rollback failed"));',
+              '        assert_ne!(state, old_state);',
+              '    }',
+          ])
+          text = text[:end] + tests + text[end:]
+          path.write_text(text)
+          PY
+
+          cargo +nightly fmt --all
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-ioevent.diff
+          sha256sum /tmp/r599-ioevent.diff | tee /tmp/r599-ioevent.sha256
+
+      - name: Run focused ioevent transaction tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib ioevent_move -- --nocapture 2>&1 | tee /tmp/r599-ioevent.log
+
+      - name: Run device-manager and compile gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r599-ioevent.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run 2>&1 | tee -a /tmp/r599-ioevent.log
+
+      - name: Stable Clippy and formatting
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +stable clippy --locked -p vmm --features kvm --all-targets -- -D warnings 2>&1 | tee -a /tmp/r599-ioevent.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-ioevent.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-ioevent.sha256 ]; then cat /tmp/r599-ioevent.sha256; fi
+            git status --short
+          } > /tmp/r599-ioevent-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-ioevent-rollback
+          path: |
+            /tmp/r599-ioevent.diff
+            /tmp/r599-ioevent.sha256
+            /tmp/r599-ioevent.log
+            /tmp/r599-ioevent-receipt.txt
+          if-no-files-found: warn
