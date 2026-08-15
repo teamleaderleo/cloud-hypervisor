@@ -1,0 +1,285 @@
+name: Bus concurrent insert overlap probe
+
+on:
+  push:
+    branches:
+      - research/ch-bus-insert-overlap-current
+  workflow_dispatch:
+
+jobs:
+  insert-overlap:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Inject deterministic concurrent-insert discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+
+          old_struct = '''#[derive(Default)]
+pub struct Bus {
+    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,
+}
+'''
+          new_struct = '''#[derive(Default)]
+pub struct Bus {
+    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,
+    #[cfg(test)]
+    insert_barrier: Mutex<Option<Arc<Barrier>>>,
+}
+'''
+          if old_struct not in text:
+              raise SystemExit("Bus struct shape changed")
+          text = text.replace(old_struct, new_struct, 1)
+
+          old_new = '''    pub fn new() -> Bus {
+        Bus {
+            devices: RwLock::new(BTreeMap::new()),
+        }
+    }
+'''
+          new_new = '''    pub fn new() -> Bus {
+        Bus {
+            devices: RwLock::new(BTreeMap::new()),
+            #[cfg(test)]
+            insert_barrier: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn set_insert_barrier(&self, barrier: Option<Arc<Barrier>>) {
+        *self.insert_barrier.lock().unwrap() = barrier;
+    }
+'''
+          if old_new not in text:
+              raise SystemExit("Bus::new shape changed")
+          text = text.replace(old_new, new_new, 1)
+
+          needle = '''        if self
+            .devices
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(range, _dev)| range.overlaps(base, len))
+        {
+            return Err(Error::Overlap);
+        }
+
+        if self
+            .devices
+            .write()
+'''
+          replacement = '''        if self
+            .devices
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(range, _dev)| range.overlaps(base, len))
+        {
+            return Err(Error::Overlap);
+        }
+
+        #[cfg(test)]
+        let insert_barrier = self.insert_barrier.lock().unwrap().clone();
+        #[cfg(test)]
+        if let Some(barrier) = insert_barrier {
+            barrier.wait();
+        }
+
+        if self
+            .devices
+            .write()
+'''
+          if needle not in text:
+              raise SystemExit("Bus::insert validation/write seam changed")
+          text = text.replace(needle, replacement, 1)
+
+          marker = "\n}\n"
+          pos = text.rfind(marker)
+          if pos < 0:
+              raise SystemExit("unit test module terminator not found")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn concurrent_overlapping_inserts_allow_only_one_route() {",
+              "        let bus = Arc::new(Bus::new());",
+              "        let first = Arc::new(DummyDevice);",
+              "        let second = Arc::new(DummyDevice);",
+              "        bus.set_insert_barrier(Some(Arc::new(Barrier::new(2))));",
+              "",
+              "        let first_bus = bus.clone();",
+              "        let first_device = first.clone();",
+              "        let first_thread = std::thread::spawn(move || {",
+              "            first_bus.insert(first_device, 0x1000, 0x1000)",
+              "        });",
+              "",
+              "        let second_bus = bus.clone();",
+              "        let second_device = second.clone();",
+              "        let second_thread = std::thread::spawn(move || {",
+              "            second_bus.insert(second_device, 0x1800, 0x1000)",
+              "        });",
+              "",
+              "        let first_result = first_thread.join().unwrap();",
+              "        let second_result = second_thread.join().unwrap();",
+              "        bus.set_insert_barrier(None);",
+              "",
+              "        let successes = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());",
+              "        let overlaps = usize::from(matches!(first_result, Err(Error::Overlap)))",
+              "            + usize::from(matches!(second_result, Err(Error::Overlap)));",
+              "        assert_eq!(successes, 1, \"exactly one overlapping route may be inserted\");",
+              "        assert_eq!(overlaps, 1, \"the losing concurrent insert must report Overlap\");",
+              "    }",
+          ]
+          text = text[:pos] + "\n".join(lines) + "\n" + text[pos:]
+          path.write_text(text)
+          PY
+
+      - name: Prove current split-lock insert accepts both overlapping routes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          set +e
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            concurrent_overlapping_inserts_allow_only_one_route \
+            -- --nocapture 2>&1 | tee /tmp/insert-baseline.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "BUS_INSERT_BASELINE_RC=$rc" | tee /tmp/insert-baseline-rc.txt
+          if [ "$rc" -eq 0 ]; then
+            echo "baseline unexpectedly serialized overlap validation and insertion" >&2
+            exit 1
+          fi
+          grep -q "exactly one overlapping route may be inserted" /tmp/insert-baseline.log
+
+      - name: Materialize one-lock Bus::insert candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          start = text.index("    #[expect(clippy::needless_pass_by_value)]\n    pub fn insert(")
+          end = text.index("    /// Removes the device", start)
+          old = text[start:end]
+          required = [
+              ".read()",
+              ".write()",
+              "range.overlaps(base, len)",
+              "insert_barrier",
+          ]
+          for needle in required:
+              if needle not in old:
+                  raise SystemExit(f"unexpected instrumented insert body; missing {needle}")
+
+          lines = [
+              "    #[expect(clippy::needless_pass_by_value)]",
+              "    pub fn insert(&self, device: Arc<dyn BusDeviceSync>, base: u64, len: u64) -> Result<()> {",
+              "        if len == 0 {",
+              "            return Err(Error::ZeroSizedRange);",
+              "        }",
+              "",
+              "        #[cfg(test)]",
+              "        let insert_barrier = self.insert_barrier.lock().unwrap().clone();",
+              "        #[cfg(test)]",
+              "        if let Some(barrier) = insert_barrier {",
+              "            barrier.wait();",
+              "        }",
+              "",
+              "        let mut devices = self.devices.write().unwrap();",
+              "        if devices",
+              "            .iter()",
+              "            .any(|(range, _dev)| range.overlaps(base, len))",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        if devices",
+              "            .insert(BusRange { base, len }, Arc::downgrade(&device))",
+              "            .is_some()",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        Ok(())",
+              "    }",
+              "",
+          ]
+          path.write_text(text[:start] + "\n".join(lines) + text[end:])
+          PY
+
+          cargo +nightly fmt --all
+          git add vm-device/src/bus.rs
+          git diff --cached --check
+          git diff --cached -- vm-device/src/bus.rs > /tmp/insert-candidate.diff
+          sha256sum /tmp/insert-candidate.diff | tee /tmp/insert-candidate.sha256
+
+      - name: Run focused candidate and existing controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : > /tmp/insert-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            concurrent_overlapping_inserts_allow_only_one_route \
+            -- --nocapture 2>&1 | tee -a /tmp/insert-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_insert -- --nocapture \
+            2>&1 | tee -a /tmp/insert-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_read_write -- --nocapture \
+            2>&1 | tee -a /tmp/insert-candidate.log
+
+      - name: Full vm-device gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee -a /tmp/insert-candidate.log
+          cargo +1.89.0 clippy --locked -p vm-device --all-targets -- -D warnings 2>&1 | tee -a /tmp/insert-candidate.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/insert-candidate.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998"
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/insert-baseline-rc.txt ]; then
+              cat /tmp/insert-baseline-rc.txt
+            fi
+            if [ -f /tmp/insert-candidate.sha256 ]; then
+              cat /tmp/insert-candidate.sha256
+            fi
+            git status --short
+          } > /tmp/insert-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-bus-insert-overlap
+          path: |
+            /tmp/insert-baseline.log
+            /tmp/insert-baseline-rc.txt
+            /tmp/insert-candidate.diff
+            /tmp/insert-candidate.sha256
+            /tmp/insert-candidate.log
+            /tmp/insert-receipt.txt
+          if-no-files-found: warn
