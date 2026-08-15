@@ -1,0 +1,91 @@
+name: PCI BAR relocation outcome probe v2
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r680-outcome
+  workflow_dispatch:
+
+jobs:
+  outcome:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out clean #599 successor base
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact successor base
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git merge-base HEAD cae581234681a45d2d7abe13c97ee3ae5d1d431e)" = "cae581234681a45d2d7abe13c97ee3ae5d1d431e"
+          test -z "$(git diff cae581234681a45d2d7abe13c97ee3ae5d1d431e -- pci/src/device.rs pci/src/lib.rs pci/src/bus.rs vmm/src/pci_segment.rs vmm/src/device_manager.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Materialize explicit relocation outcome candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 .linux-fieldwork/materialize-r680.py
+          cargo +nightly fmt --all
+          git add pci/src/device.rs pci/src/lib.rs pci/src/bus.rs vmm/src/pci_segment.rs vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached > /tmp/r680-outcome.diff
+          sha256sum /tmp/r680-outcome.diff | tee /tmp/r680-outcome.sha256
+
+      - name: Run PCI outcome regressions and controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p pci --lib published_move_error_keeps_new_config -- --nocapture 2>&1 | tee /tmp/r680-outcome.log
+          cargo +1.89.0 test --locked -p pci --lib rejected_move_error_restores_old_config -- --nocapture 2>&1 | tee -a /tmp/r680-outcome.log
+          cargo +1.89.0 test --locked -p pci --lib 2>&1 | tee -a /tmp/r680-outcome.log
+
+      - name: Run successor VMM controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee -a /tmp/r680-outcome.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r680-outcome.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run 2>&1 | tee -a /tmp/r680-outcome.log
+
+      - name: Project quality gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +stable clippy --locked --all --all-targets --no-default-features --tests --examples --features kvm -- -D warnings 2>&1 | tee -a /tmp/r680-outcome.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r680-outcome.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo 'successor_base=cae581234681a45d2d7abe13c97ee3ae5d1d431e'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r680-outcome.sha256 ]; then cat /tmp/r680-outcome.sha256; fi
+            git status --short
+          } > /tmp/r680-outcome-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r680-outcome-v2
+          path: |
+            /tmp/r680-outcome.diff
+            /tmp/r680-outcome.sha256
+            /tmp/r680-outcome.log
+            /tmp/r680-outcome-receipt.txt
+          if-no-files-found: warn
