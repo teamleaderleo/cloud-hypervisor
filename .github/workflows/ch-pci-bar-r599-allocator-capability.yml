@@ -1,0 +1,117 @@
+name: PCI BAR allocator relocation capability probe
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-allocator-capability
+    paths:
+      - .linux-fieldwork/ch-r599-allocator-trigger
+
+jobs:
+  allocator-capability:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git show 69d4c0a82ef15b2660906013bd87ae32668e7998:vm-allocator/src/address.rs >/tmp/address-upstream.rs
+          cmp /tmp/address-upstream.rs vm-allocator/src/address.rs
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+
+      - name: Inject relocation capability discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("vm-allocator/src/address.rs")
+          text = path.read_text()
+          pos = text.rfind("\n}\n")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn relocation_reservation_capability() {",
+              "        let mut pool = AddressAllocator::new(GuestAddress(0x1000), 0x10000).unwrap();",
+              "        let old = GuestAddress(0x4000);",
+              "        let disjoint_new = GuestAddress(0x8000);",
+              "        let overlapping_new = GuestAddress(0x4800);",
+              "        let size = 0x1000;",
+              "",
+              "        assert_eq!(pool.allocate(Some(old), size, Some(0x100)), Some(old));",
+              "",
+              "        assert_eq!(",
+              "            pool.allocate(Some(disjoint_new), size, Some(0x100)),",
+              "            Some(disjoint_new),",
+              "            \"existing allocator can reserve a disjoint NEW while OLD stays leased\"",
+              "        );",
+              "        pool.free(disjoint_new, size);",
+              "",
+              "        assert_eq!(",
+              "            pool.allocate(Some(overlapping_new), size, Some(0x100)),",
+              "            None,",
+              "            \"existing allocator cannot reserve an overlapping NEW while OLD stays leased\"",
+              "        );",
+              "",
+              "        pool.free(old, size);",
+              "        assert_eq!(",
+              "            pool.allocate(Some(old), size, Some(0x100)),",
+              "            Some(old),",
+              "            \"once OLD is freed, a competing client can immediately reuse it\"",
+              "        );",
+              "        assert_eq!(",
+              "            pool.allocate(Some(overlapping_new), size, Some(0x100)),",
+              "            None,",
+              "            \"competing OLD reuse blocks the intended overlapping NEW relocation\"",
+              "        );",
+              "",
+              "        pool.free(old, size);",
+              "        assert_eq!(",
+              "            pool.allocate(Some(overlapping_new), size, Some(0x100)),",
+              "            Some(overlapping_new),",
+              "            \"overlapping NEW becomes reservable only after OLD is no longer leased\"",
+              "        );",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
+          PY
+
+      - name: Run discriminator and full allocator tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-allocator --lib relocation_reservation_capability -- --nocapture 2>&1 | tee /tmp/r599-allocator.log
+          cargo +1.89.0 test --locked -p vm-allocator 2>&1 | tee /tmp/r599-allocator-full.log
+          git diff --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998"
+            echo "runner_head=$(git rev-parse HEAD)"
+            git status --short
+          } > /tmp/r599-allocator-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-allocator-capability
+          path: |
+            /tmp/r599-allocator.log
+            /tmp/r599-allocator-full.log
+            /tmp/r599-allocator-receipt.txt
+          if-no-files-found: warn
