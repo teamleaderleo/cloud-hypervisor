@@ -1,0 +1,201 @@
+name: PCI bus update_range atomicity probe
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-reuse-r599-current
+  workflow_dispatch:
+
+jobs:
+  bus-update-range:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current-main research branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Inject failure-atomicity discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          marker = "\n}\n"
+          pos = text.rfind(marker)
+          if pos < 0:
+              raise SystemExit("unit test module terminator not found")
+          test = r'''
+
+    #[test]
+    fn update_range_overlap_failure_preserves_old_range() {
+        let bus = Bus::new();
+        let first = Arc::new(DummyDevice);
+        let second = Arc::new(DummyDevice);
+
+        bus.insert(first, 0x1000, 0x100).unwrap();
+        bus.insert(second, 0x2000, 0x100).unwrap();
+
+        let err = bus
+            .update_range(0x1000, 0x100, 0x2000, 0x100)
+            .expect_err("moving onto an occupied range must fail");
+        assert!(matches!(err, Error::Overlap));
+
+        bus.read(0x1000, &mut [0])
+            .expect("failed update_range must preserve the old route");
+        bus.read(0x2000, &mut [0])
+            .expect("failed update_range must preserve the conflicting route");
+    }
+'''
+          path.write_text(text[:pos] + test + text[pos:])
+          PY
+
+      - name: Prove current implementation loses OLD on overlap failure
+        shell: bash
+        run: |
+          set -euxo pipefail
+          set +e
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            unit_tests::update_range_overlap_failure_preserves_old_range \
+            -- --exact --nocapture 2>&1 | tee /tmp/r599-baseline.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "BUS_UPDATE_BASELINE_RC=$rc" | tee /tmp/r599-baseline-rc.txt
+          if [ "$rc" -eq 0 ]; then
+            echo "baseline unexpectedly preserved OLD" >&2
+            exit 1
+          fi
+          grep -q "failed update_range must preserve the old route" /tmp/r599-baseline.log
+
+      - name: Materialize failure-atomic update_range candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          start = text.index("    pub fn update_range(")
+          end = text.index("    /// Reads data from the device", start)
+          old = text[start:end]
+          required = [
+              "self.resolve(old_base)",
+              "self.remove(old_base, old_len)?",
+              "self.insert(device, new_base, new_len)",
+          ]
+          for needle in required:
+              if needle not in old:
+                  raise SystemExit(f"unexpected current update_range body; missing {needle}")
+
+          lines = [
+              "    pub fn update_range(",
+              "        &self,",
+              "        old_base: u64,",
+              "        old_len: u64,",
+              "        new_base: u64,",
+              "        new_len: u64,",
+              "    ) -> Result<()> {",
+              "        if old_len == 0 || new_len == 0 {",
+              "            return Err(Error::ZeroSizedRange);",
+              "        }",
+              "",
+              "        let old_range = BusRange {",
+              "            base: old_base,",
+              "            len: old_len,",
+              "        };",
+              "        let new_range = BusRange {",
+              "            base: new_base,",
+              "            len: new_len,",
+              "        };",
+              "        let mut devices = self.devices.write().unwrap();",
+              "",
+              "        let device = devices",
+              "            .get(&old_range)",
+              "            .cloned()",
+              "            .ok_or(Error::MissingAddressRange)?;",
+              "        if device.upgrade().is_none() {",
+              "            return Err(Error::MissingAddressRange);",
+              "        }",
+              "",
+              "        if devices",
+              "            .iter()",
+              "            .any(|(range, _)| *range != old_range && range.overlaps(new_base, new_len))",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        devices.remove(&old_range);",
+              "        debug_assert!(devices.insert(new_range, device).is_none());",
+              "        Ok(())",
+              "    }",
+              "",
+          ]
+          path.write_text(text[:start] + "\n".join(lines) + text[end:])
+          PY
+
+          cargo +nightly fmt --all
+          git add vm-device/src/bus.rs
+          git diff --cached --check
+          git diff --cached -- vm-device/src/bus.rs > /tmp/r599-candidate.diff
+          sha256sum /tmp/r599-candidate.diff | tee /tmp/r599-candidate.sha256
+
+      - name: Run focused candidate and controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : > /tmp/r599-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            unit_tests::update_range_overlap_failure_preserves_old_range \
+            -- --exact --nocapture 2>&1 | tee -a /tmp/r599-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            unit_tests::bus_insert \
+            -- --exact --nocapture 2>&1 | tee -a /tmp/r599-candidate.log
+          cargo +1.89.0 test --locked -p vm-device --lib \
+            unit_tests::bus_read_write \
+            -- --exact --nocapture 2>&1 | tee -a /tmp/r599-candidate.log
+
+      - name: Full vm-device gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee -a /tmp/r599-candidate.log
+          cargo +1.89.0 clippy --locked -p vm-device --all-targets -- -D warnings 2>&1 | tee -a /tmp/r599-candidate.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-candidate.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998"
+            echo "runner_head=$(git rev-parse HEAD)"
+            git status --short
+            [ -f /tmp/r599-baseline-rc.txt ] && cat /tmp/r599-baseline-rc.txt
+            [ -f /tmp/r599-candidate.sha256 ] && cat /tmp/r599-candidate.sha256
+          } > /tmp/r599-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-pci-bus-update-range-r599
+          path: |
+            /tmp/r599-baseline.log
+            /tmp/r599-baseline-rc.txt
+            /tmp/r599-candidate.diff
+            /tmp/r599-candidate.sha256
+            /tmp/r599-candidate.log
+            /tmp/r599-receipt.txt
+          if-no-files-found: warn
