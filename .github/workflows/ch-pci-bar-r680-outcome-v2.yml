@@ -1,4 +1,4 @@
-name: PCI BAR relocation outcome probe v2
+name: PCI BAR relocation outcome probe v3
 
 on:
   push:
@@ -34,6 +34,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          python3 .linux-fieldwork/fix-r680-materializer-marker.py
           python3 .linux-fieldwork/materialize-r680.py
           cargo +nightly fmt --all
           git add pci/src/device.rs pci/src/lib.rs pci/src/bus.rs vmm/src/pci_segment.rs vmm/src/device_manager.rs
@@ -82,7 +83,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ch-r680-outcome-v2
+          name: ch-r680-outcome-v3
           path: |
             /tmp/r680-outcome.diff
             /tmp/r680-outcome.sha256
