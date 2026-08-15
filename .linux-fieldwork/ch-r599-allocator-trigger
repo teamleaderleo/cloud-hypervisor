@@ -1,1 +1,2 @@
 Probe existing allocator ability to reserve NEW while OLD stays leased.
+Trigger generation 2.
