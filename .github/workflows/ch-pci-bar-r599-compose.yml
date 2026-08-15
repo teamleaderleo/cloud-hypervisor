@@ -1,0 +1,187 @@
+name: PCI BAR reuse composition
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-compose
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out composition branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact base identities
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git merge-base --is-ancestor 69d4c0a82ef15b2660906013bd87ae32668e7998 HEAD
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs)"
+          test "$(git rev-parse 2edcf22f0bd35beff06ab2b4e132cf240e54d2f9:vm-device/src/bus.rs)" = "$(git rev-parse HEAD:vm-device/src/bus.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Materialize exact NEW-first and ioevent candidates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git show origin/research/ch-pci-bar-r599-new-first:.github/workflows/ch-pci-bar-r599-new-first.yml > /tmp/new-first.yml
+          git show origin/research/ch-pci-bar-r599-ioevent-rollback:.github/workflows/ch-pci-bar-r599-ioevent-rollback.yml > /tmp/ioevent.yml
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def extract(source_path, output_path):
+              lines = Path(source_path).read_text().splitlines()
+              start = next(i for i, line in enumerate(lines) if line.strip() == "python3 - <<'PY'") + 1
+              end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'PY')
+              body = lines[start:end]
+              indent = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+              Path(output_path).write_text('\n'.join(line[indent:] for line in body) + '\n')
+
+          extract('/tmp/new-first.yml', '/tmp/materialize-new-first.py')
+          extract('/tmp/ioevent.yml', '/tmp/materialize-ioevent.py')
+          PY
+
+          python3 /tmp/materialize-new-first.py
+          python3 /tmp/materialize-ioevent.py
+
+          # Apply only the already-validated test-style cleanups used by the authoritative runs.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('vmm/src/device_manager.rs')
+          text = path.read_text()
+
+          def edit_test(text, name, edits):
+              start = text.index('    fn ' + name + '() {')
+              next_test = text.find('\n    #[test]', start + 1)
+              end = next_test if next_test >= 0 else text.rfind('\n}')
+              section = text[start:end]
+              for old, new in edits:
+                  if old not in section:
+                      raise SystemExit(name + ': fixture text missing: ' + old.strip())
+                  section = section.replace(old, new, 1)
+              return text[:start] + section + text[end:]
+
+          text = edit_test(
+              text,
+              'mmio_bar_reservation_error_quarantines_old_and_new',
+              [
+                  ('        let reservation = MmioBarRelocationReservation::new(', '        let _reservation = MmioBarRelocationReservation::new('),
+                  ('        drop(reservation);\n', ''),
+              ],
+          )
+          text = edit_test(
+              text,
+              'mmio_bar_reservation_does_not_hold_allocator_mutex',
+              [
+                  ('        let reservation = MmioBarRelocationReservation::new(', '        let _reservation = MmioBarRelocationReservation::new('),
+                  ('        assert!(allocator.try_lock().is_ok());\n', '        let _guard = allocator.try_lock().unwrap();\n'),
+                  ('        drop(reservation);\n', ''),
+              ],
+          )
+
+          marker = '#[cfg(test)]\nmod unit_tests {\n'
+          if marker not in text:
+              raise SystemExit('unit test module marker missing')
+          if 'std::collections::HashSet<(i32, u64)>' not in text:
+              raise SystemExit('ioevent absolute HashSet test type missing')
+          text = text.replace(marker, marker + '    use std::collections::HashSet;\n', 1)
+          text = text.replace('std::collections::HashSet<(i32, u64)>', 'HashSet<(i32, u64)>', 1)
+          path.write_text(text)
+          PY
+
+          cargo +nightly fmt --all
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-compose-vmm.diff
+          sha256sum /tmp/r599-compose-vmm.diff | tee /tmp/r599-compose-vmm.sha256
+
+      - name: Run generic Bus suite
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee /tmp/r599-compose.log
+
+      - name: Run VMM focused lifecycle tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib mmio_bar_reservation -- --nocapture 2>&1 | tee -a /tmp/r599-compose.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib ioevent_move -- --nocapture 2>&1 | tee -a /tmp/r599-compose.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r599-compose.log
+
+      - name: Compile complete KVM-flavoured VMM tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run 2>&1 | tee -a /tmp/r599-compose.log
+
+      - name: Run project stable KVM Clippy
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +stable clippy --locked --all --all-targets --no-default-features --tests --examples --features kvm -- -D warnings 2>&1 | tee -a /tmp/r599-compose.log
+
+      - name: Formatting and diff gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-compose.log
+          git diff --cached --check
+
+      - name: Commit tested VMM candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name Leo
+          git config user.email cheerleaderleo@outlook.com
+          git commit -s \
+            -m 'vmm: Delay MMIO BAR reuse until relocation completes' \
+            -m 'Reserve the replacement MMIO BAR before publishing the old address as free. Move virtio config-BAR ioevents transactionally so primary registration failures restore the old registration set.' \
+            -m 'Assisted-by: ChatGPT:GPT-5.6 Sol'
+          git push origin HEAD:research/ch-pci-bar-r599-compose
+          git rev-parse HEAD | tee /tmp/r599-compose-head.txt
+          git rev-parse HEAD:vmm/src/device_manager.rs | tee /tmp/r599-compose-vmm-blob.txt
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo 'bus_clean_base=2edcf22f0bd35beff06ab2b4e132cf240e54d2f9'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-compose-vmm.sha256 ]; then cat /tmp/r599-compose-vmm.sha256; fi
+            if [ -f /tmp/r599-compose-head.txt ]; then cat /tmp/r599-compose-head.txt; fi
+            if [ -f /tmp/r599-compose-vmm-blob.txt ]; then cat /tmp/r599-compose-vmm-blob.txt; fi
+            git status --short
+          } > /tmp/r599-compose-receipt.txt
+
+      - name: Upload composition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-compose
+          path: |
+            /tmp/r599-compose-vmm.diff
+            /tmp/r599-compose-vmm.sha256
+            /tmp/r599-compose.log
+            /tmp/r599-compose-head.txt
+            /tmp/r599-compose-vmm-blob.txt
+            /tmp/r599-compose-receipt.txt
+          if-no-files-found: warn
