@@ -51,22 +51,39 @@ jobs:
           path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
           PY
 
-      - name: Prove current endpoint arithmetic overflows
+      - name: Prove debug arithmetic panics
         shell: bash
         run: |
           set -euxo pipefail
           set +e
           cargo +1.89.0 test --locked -p vm-device --lib \
             bus_range_overlap_handles_high_address_endpoints \
-            -- --nocapture 2>&1 | tee /tmp/range-baseline.log
+            -- --nocapture 2>&1 | tee /tmp/range-baseline-debug.log
           rc=${PIPESTATUS[0]}
           set -e
-          echo "BUS_RANGE_BASELINE_RC=$rc" | tee /tmp/range-baseline-rc.txt
+          echo "BUS_RANGE_DEBUG_RC=$rc" | tee /tmp/range-baseline-rc.txt
           if [ "$rc" -eq 0 ]; then
-            echo "baseline unexpectedly handled high-address endpoint arithmetic" >&2
+            echo "debug baseline unexpectedly handled high-address endpoint arithmetic" >&2
             exit 1
           fi
-          grep -q "attempt to add with overflow" /tmp/range-baseline.log
+          grep -q "attempt to add with overflow" /tmp/range-baseline-debug.log
+
+      - name: Prove optimized arithmetic wraps to the wrong answer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          set +e
+          cargo +1.89.0 test --release --locked -p vm-device --lib \
+            bus_range_overlap_handles_high_address_endpoints \
+            -- --nocapture 2>&1 | tee /tmp/range-baseline-release.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "BUS_RANGE_RELEASE_RC=$rc" | tee -a /tmp/range-baseline-rc.txt
+          if [ "$rc" -eq 0 ]; then
+            echo "release baseline unexpectedly returned the correct overlap result" >&2
+            exit 1
+          fi
+          grep -q "assertion failed: high.overlaps" /tmp/range-baseline-release.log
 
       - name: Materialize widened-endpoint candidate
         shell: bash
@@ -90,12 +107,15 @@ jobs:
           git diff --cached -- vm-device/src/bus.rs > /tmp/range-candidate.diff
           sha256sum /tmp/range-candidate.diff | tee /tmp/range-candidate.sha256
 
-      - name: Run focused candidate and controls
+      - name: Run focused candidate in debug and release
         shell: bash
         run: |
           set -euxo pipefail
           : > /tmp/range-candidate.log
           cargo +1.89.0 test --locked -p vm-device --lib \
+            bus_range_overlap_handles_high_address_endpoints \
+            -- --nocapture 2>&1 | tee -a /tmp/range-candidate.log
+          cargo +1.89.0 test --release --locked -p vm-device --lib \
             bus_range_overlap_handles_high_address_endpoints \
             -- --nocapture 2>&1 | tee -a /tmp/range-candidate.log
           cargo +1.89.0 test --locked -p vm-device --lib bus_range_overlap -- --nocapture \
@@ -131,7 +151,8 @@ jobs:
         with:
           name: ch-bus-range-overflow
           path: |
-            /tmp/range-baseline.log
+            /tmp/range-baseline-debug.log
+            /tmp/range-baseline-release.log
             /tmp/range-baseline-rc.txt
             /tmp/range-candidate.diff
             /tmp/range-candidate.sha256
