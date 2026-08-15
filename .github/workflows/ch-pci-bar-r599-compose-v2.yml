@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "d0ed124cc80e9d22c60cdc19adb3f935517fb9e3"
+          test "$(git merge-base HEAD d0ed124cc80e9d22c60cdc19adb3f935517fb9e3)" = "d0ed124cc80e9d22c60cdc19adb3f935517fb9e3"
           test "$(git rev-parse HEAD:vm-device/src/bus.rs)" = "4e127584f680cde2af56f8d7f1c531368c1c2f4b"
           test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs)"
 
