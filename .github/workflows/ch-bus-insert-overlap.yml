@@ -32,80 +32,90 @@ jobs:
           path = Path("vm-device/src/bus.rs")
           text = path.read_text()
 
-          old_struct = '''#[derive(Default)]
-pub struct Bus {
-    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,
-}
-'''
-          new_struct = '''#[derive(Default)]
-pub struct Bus {
-    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,
-    #[cfg(test)]
-    insert_barrier: Mutex<Option<Arc<Barrier>>>,
-}
-'''
+          old_struct = "\n".join([
+              "#[derive(Default)]",
+              "pub struct Bus {",
+              "    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,",
+              "}",
+              "",
+          ])
+          new_struct = "\n".join([
+              "#[derive(Default)]",
+              "pub struct Bus {",
+              "    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,",
+              "    #[cfg(test)]",
+              "    insert_barrier: Mutex<Option<Arc<Barrier>>>,",
+              "}",
+              "",
+          ])
           if old_struct not in text:
               raise SystemExit("Bus struct shape changed")
           text = text.replace(old_struct, new_struct, 1)
 
-          old_new = '''    pub fn new() -> Bus {
-        Bus {
-            devices: RwLock::new(BTreeMap::new()),
-        }
-    }
-'''
-          new_new = '''    pub fn new() -> Bus {
-        Bus {
-            devices: RwLock::new(BTreeMap::new()),
-            #[cfg(test)]
-            insert_barrier: Mutex::new(None),
-        }
-    }
-
-    #[cfg(test)]
-    fn set_insert_barrier(&self, barrier: Option<Arc<Barrier>>) {
-        *self.insert_barrier.lock().unwrap() = barrier;
-    }
-'''
+          old_new = "\n".join([
+              "    pub fn new() -> Bus {",
+              "        Bus {",
+              "            devices: RwLock::new(BTreeMap::new()),",
+              "        }",
+              "    }",
+              "",
+          ])
+          new_new = "\n".join([
+              "    pub fn new() -> Bus {",
+              "        Bus {",
+              "            devices: RwLock::new(BTreeMap::new()),",
+              "            #[cfg(test)]",
+              "            insert_barrier: Mutex::new(None),",
+              "        }",
+              "    }",
+              "",
+              "    #[cfg(test)]",
+              "    fn set_insert_barrier(&self, barrier: Option<Arc<Barrier>>) {",
+              "        *self.insert_barrier.lock().unwrap() = barrier;",
+              "    }",
+              "",
+          ])
           if old_new not in text:
               raise SystemExit("Bus::new shape changed")
           text = text.replace(old_new, new_new, 1)
 
-          needle = '''        if self
-            .devices
-            .read()
-            .unwrap()
-            .iter()
-            .any(|(range, _dev)| range.overlaps(base, len))
-        {
-            return Err(Error::Overlap);
-        }
-
-        if self
-            .devices
-            .write()
-'''
-          replacement = '''        if self
-            .devices
-            .read()
-            .unwrap()
-            .iter()
-            .any(|(range, _dev)| range.overlaps(base, len))
-        {
-            return Err(Error::Overlap);
-        }
-
-        #[cfg(test)]
-        let insert_barrier = self.insert_barrier.lock().unwrap().clone();
-        #[cfg(test)]
-        if let Some(barrier) = insert_barrier {
-            barrier.wait();
-        }
-
-        if self
-            .devices
-            .write()
-'''
+          needle = "\n".join([
+              "        if self",
+              "            .devices",
+              "            .read()",
+              "            .unwrap()",
+              "            .iter()",
+              "            .any(|(range, _dev)| range.overlaps(base, len))",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        if self",
+              "            .devices",
+              "            .write()",
+          ])
+          replacement = "\n".join([
+              "        if self",
+              "            .devices",
+              "            .read()",
+              "            .unwrap()",
+              "            .iter()",
+              "            .any(|(range, _dev)| range.overlaps(base, len))",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        #[cfg(test)]",
+              "        let insert_barrier = self.insert_barrier.lock().unwrap().clone();",
+              "        #[cfg(test)]",
+              "        if let Some(barrier) = insert_barrier {",
+              "            barrier.wait();",
+              "        }",
+              "",
+              "        if self",
+              "            .devices",
+              "            .write()",
+          ])
           if needle not in text:
               raise SystemExit("Bus::insert validation/write seam changed")
           text = text.replace(needle, replacement, 1)
@@ -114,7 +124,7 @@ pub struct Bus {
           pos = text.rfind(marker)
           if pos < 0:
               raise SystemExit("unit test module terminator not found")
-          lines = [
+          test_lines = [
               "",
               "    #[test]",
               "    fn concurrent_overlapping_inserts_allow_only_one_route() {",
@@ -146,7 +156,7 @@ pub struct Bus {
               "        assert_eq!(overlaps, 1, \"the losing concurrent insert must report Overlap\");",
               "    }",
           ]
-          text = text[:pos] + "\n".join(lines) + "\n" + text[pos:]
+          text = text[:pos] + "\n".join(test_lines) + "\n" + text[pos:]
           path.write_text(text)
           PY
 
