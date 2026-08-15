@@ -1,0 +1,489 @@
+name: vm-device Bus three-finding composition
+
+on:
+  push:
+    branches:
+      - research/ch-bus-r677-r678-r679-stack
+    paths:
+      - .linux-fieldwork/ch-bus-stack-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  compose-bus:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact-current stack branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact upstream base
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git merge-base --is-ancestor 69d4c0a82ef15b2660906013bd87ae32668e7998 HEAD
+          git show 69d4c0a82ef15b2660906013bd87ae32668e7998:vm-device/src/bus.rs >/tmp/bus-upstream.rs
+          cmp /tmp/bus-upstream.rs vm-device/src/bus.rs
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Re-prove update_range losing baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          pos = text.rfind("\n}\n")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn update_range_overlap_failure_preserves_old_range() {",
+              "        let bus = Bus::new();",
+              "        let first = Arc::new(DummyDevice);",
+              "        let second = Arc::new(DummyDevice);",
+              "        bus.insert(first.clone(), 0x1000, 0x100).unwrap();",
+              "        bus.insert(second.clone(), 0x2000, 0x100).unwrap();",
+              "        let err = bus.update_range(0x1000, 0x100, 0x2000, 0x100).unwrap_err();",
+              "        assert!(matches!(err, Error::Overlap));",
+              "        bus.read(0x1000, &mut [0])",
+              "            .expect(\"failed update_range must preserve the old route\");",
+              "        bus.read(0x2000, &mut [0])",
+              "            .expect(\"failed update_range must preserve the conflicting route\");",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
+          PY
+          set +e
+          cargo +1.89.0 test --locked -p vm-device --lib update_range_overlap_failure_preserves_old_range -- --nocapture 2>&1 | tee /tmp/r677-baseline.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "R677_BASELINE_RC=$rc" > /tmp/r677-baseline-rc.txt
+          test "$rc" -ne 0
+          grep -q "failed update_range must preserve the old route" /tmp/r677-baseline.log
+          git checkout -- vm-device/src/bus.rs
+
+      - name: Re-prove concurrent insert losing baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          text = text.replace(
+              "use std::sync::{Arc, Barrier, Mutex, RwLock, Weak};\n",
+              "use std::sync::{Arc, Barrier, Mutex, RwLock, Weak};\n",
+              1,
+          )
+          old_struct = "\n".join([
+              "#[derive(Default)]",
+              "pub struct Bus {",
+              "    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,",
+              "}",
+          ])
+          new_struct = "\n".join([
+              "#[derive(Default)]",
+              "pub struct Bus {",
+              "    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,",
+              "    #[cfg(test)]",
+              "    insert_barrier: Mutex<Option<Arc<Barrier>>>,",
+              "}",
+          ])
+          if old_struct not in text:
+              raise SystemExit("Bus struct changed")
+          text = text.replace(old_struct, new_struct, 1)
+          old_new = "\n".join([
+              "    pub fn new() -> Bus {",
+              "        Bus {",
+              "            devices: RwLock::new(BTreeMap::new()),",
+              "        }",
+              "    }",
+          ])
+          new_new = "\n".join([
+              "    pub fn new() -> Bus {",
+              "        Bus {",
+              "            devices: RwLock::new(BTreeMap::new()),",
+              "            #[cfg(test)]",
+              "            insert_barrier: Mutex::new(None),",
+              "        }",
+              "    }",
+              "",
+              "    #[cfg(test)]",
+              "    fn set_insert_barrier(&self, barrier: Option<Arc<Barrier>>) {",
+              "        *self.insert_barrier.lock().unwrap() = barrier;",
+              "    }",
+          ])
+          if old_new not in text:
+              raise SystemExit("Bus::new changed")
+          text = text.replace(old_new, new_new, 1)
+          seam = "\n".join([
+              "        if self",
+              "            .devices",
+              "            .write()",
+          ])
+          injected = "\n".join([
+              "        #[cfg(test)]",
+              "        let insert_barrier = self.insert_barrier.lock().unwrap().clone();",
+              "        #[cfg(test)]",
+              "        if let Some(barrier) = insert_barrier {",
+              "            barrier.wait();",
+              "        }",
+              "",
+              "        if self",
+              "            .devices",
+              "            .write()",
+          ])
+          if seam not in text:
+              raise SystemExit("insert write seam changed")
+          text = text.replace(seam, injected, 1)
+          text = text.replace("mod unit_tests {\n    use super::*;", "mod unit_tests {\n    use std::thread;\n\n    use super::*;", 1)
+          pos = text.rfind("\n}\n")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn concurrent_overlapping_inserts_allow_only_one_route() {",
+              "        let bus = Arc::new(Bus::new());",
+              "        let first = Arc::new(DummyDevice);",
+              "        let second = Arc::new(DummyDevice);",
+              "        bus.set_insert_barrier(Some(Arc::new(Barrier::new(2))));",
+              "        let first_bus = bus.clone();",
+              "        let first_device = first.clone();",
+              "        let first_thread = thread::spawn(move || first_bus.insert(first_device, 0x1000, 0x1000));",
+              "        let second_bus = bus.clone();",
+              "        let second_device = second.clone();",
+              "        let second_thread = thread::spawn(move || second_bus.insert(second_device, 0x1800, 0x1000));",
+              "        let first_result = first_thread.join().unwrap();",
+              "        let second_result = second_thread.join().unwrap();",
+              "        bus.set_insert_barrier(None);",
+              "        let successes = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());",
+              "        let overlaps = usize::from(matches!(first_result, Err(Error::Overlap)))",
+              "            + usize::from(matches!(second_result, Err(Error::Overlap)));",
+              "        assert_eq!(successes, 1, \"exactly one overlapping route may be inserted\");",
+              "        assert_eq!(overlaps, 1, \"the losing concurrent insert must report Overlap\");",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
+          PY
+          set +e
+          cargo +1.89.0 test --locked -p vm-device --lib concurrent_overlapping_inserts_allow_only_one_route -- --nocapture 2>&1 | tee /tmp/r678-baseline.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "R678_BASELINE_RC=$rc" > /tmp/r678-baseline-rc.txt
+          test "$rc" -ne 0
+          grep -q "exactly one overlapping route may be inserted" /tmp/r678-baseline.log
+          git checkout -- vm-device/src/bus.rs
+
+      - name: Re-prove high-address arithmetic baselines
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          pos = text.rfind("\n}\n")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn bus_range_overlap_handles_high_address_endpoints() {",
+              "        let high = BusRange { base: u64::MAX - 0x10, len: 0x20 };",
+              "        assert!(high.overlaps(u64::MAX - 8, 4));",
+              "        assert!(!high.overlaps(0x1000, 0x100));",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
+          PY
+          set +e
+          cargo +1.89.0 test --locked -p vm-device --lib bus_range_overlap_handles_high_address_endpoints -- --nocapture 2>&1 | tee /tmp/r679-debug-baseline.log
+          debug_rc=${PIPESTATUS[0]}
+          cargo +1.89.0 test --release --locked -p vm-device --lib bus_range_overlap_handles_high_address_endpoints -- --nocapture 2>&1 | tee /tmp/r679-release-baseline.log
+          release_rc=${PIPESTATUS[0]}
+          set -e
+          printf 'R679_DEBUG_BASELINE_RC=%s\nR679_RELEASE_BASELINE_RC=%s\n' "$debug_rc" "$release_rc" > /tmp/r679-baseline-rc.txt
+          test "$debug_rc" -ne 0
+          test "$release_rc" -ne 0
+          grep -q "attempt to add with overflow" /tmp/r679-debug-baseline.log
+          grep -q "assertion failed: high.overlaps" /tmp/r679-release-baseline.log
+          git checkout -- vm-device/src/bus.rs
+
+      - name: Materialize combined candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+
+          old_overlap = "        self.base < (base + len) && base < self.base + self.len\n"
+          new_overlap = "        (self.base as u128) < (base as u128 + len as u128)\n            && (base as u128) < (self.base as u128 + self.len as u128)\n"
+          if old_overlap not in text:
+              raise SystemExit("BusRange::overlaps changed")
+          text = text.replace(old_overlap, new_overlap, 1)
+
+          insert_start = text.index("    #[expect(clippy::needless_pass_by_value)]\n    pub fn insert(")
+          insert_end = text.index("    /// Removes the device", insert_start)
+          insert_lines = [
+              "    #[expect(clippy::needless_pass_by_value)]",
+              "    pub fn insert(&self, device: Arc<dyn BusDeviceSync>, base: u64, len: u64) -> Result<()> {",
+              "        if len == 0 {",
+              "            return Err(Error::ZeroSizedRange);",
+              "        }",
+              "",
+              "        let mut devices = self.devices.write().unwrap();",
+              "        if devices",
+              "            .iter()",
+              "            .any(|(range, _dev)| range.overlaps(base, len))",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        if devices",
+              "            .insert(BusRange { base, len }, Arc::downgrade(&device))",
+              "            .is_some()",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        Ok(())",
+              "    }",
+              "",
+          ]
+          text = text[:insert_start] + "\n".join(insert_lines) + text[insert_end:]
+
+          update_start = text.index("    pub fn update_range(")
+          update_end = text.index("    /// Reads data from the device", update_start)
+          update_lines = [
+              "    pub fn update_range(",
+              "        &self,",
+              "        old_base: u64,",
+              "        old_len: u64,",
+              "        new_base: u64,",
+              "        new_len: u64,",
+              "    ) -> Result<()> {",
+              "        if old_len == 0 || new_len == 0 {",
+              "            return Err(Error::ZeroSizedRange);",
+              "        }",
+              "",
+              "        let old_range = BusRange { base: old_base, len: old_len };",
+              "        let new_range = BusRange { base: new_base, len: new_len };",
+              "        let mut devices = self.devices.write().unwrap();",
+              "        let device = devices",
+              "            .get(&old_range)",
+              "            .cloned()",
+              "            .ok_or(Error::MissingAddressRange)?;",
+              "        if device.upgrade().is_none() {",
+              "            return Err(Error::MissingAddressRange);",
+              "        }",
+              "",
+              "        if devices",
+              "            .iter()",
+              "            .any(|(range, _)| *range != old_range && range.overlaps(new_base, new_len))",
+              "        {",
+              "            return Err(Error::Overlap);",
+              "        }",
+              "",
+              "        devices.remove(&old_range);",
+              "        debug_assert!(devices.insert(new_range, device).is_none());",
+              "        Ok(())",
+              "    }",
+              "",
+          ]
+          text = text[:update_start] + "\n".join(update_lines) + text[update_end:]
+
+          pos = text.rfind("\n}\n")
+          tests = [
+              "",
+              "    #[test]",
+              "    fn update_range_overlap_failure_preserves_old_range() {",
+              "        let bus = Bus::new();",
+              "        let first = Arc::new(DummyDevice);",
+              "        let second = Arc::new(DummyDevice);",
+              "        bus.insert(first.clone(), 0x1000, 0x100).unwrap();",
+              "        bus.insert(second.clone(), 0x2000, 0x100).unwrap();",
+              "        let err = bus.update_range(0x1000, 0x100, 0x2000, 0x100).unwrap_err();",
+              "        assert!(matches!(err, Error::Overlap));",
+              "        bus.read(0x1000, &mut [0]).unwrap();",
+              "        bus.read(0x2000, &mut [0]).unwrap();",
+              "    }",
+              "",
+              "    #[test]",
+              "    fn bus_range_overlap_handles_high_address_endpoints() {",
+              "        let high = BusRange { base: u64::MAX - 0x10, len: 0x20 };",
+              "        assert!(high.overlaps(u64::MAX - 8, 4));",
+              "        assert!(!high.overlaps(0x1000, 0x100));",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(tests) + "\n" + text[pos:])
+          PY
+          cargo +nightly fmt --all
+          cp vm-device/src/bus.rs /tmp/bus-stack-candidate.rs
+          git diff --check
+          git diff -- vm-device/src/bus.rs > /tmp/bus-stack.diff
+          sha256sum /tmp/bus-stack.diff | tee /tmp/bus-stack.sha256
+
+      - name: Run permanent candidate regressions and controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : > /tmp/bus-stack-tests.log
+          cargo +1.89.0 test --locked -p vm-device --lib update_range_overlap_failure_preserves_old_range -- --nocapture 2>&1 | tee -a /tmp/bus-stack-tests.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_range_overlap_handles_high_address_endpoints -- --nocapture 2>&1 | tee -a /tmp/bus-stack-tests.log
+          cargo +1.89.0 test --release --locked -p vm-device --lib bus_range_overlap_handles_high_address_endpoints -- --nocapture 2>&1 | tee -a /tmp/bus-stack-tests.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_insert -- --nocapture 2>&1 | tee -a /tmp/bus-stack-tests.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_read_write -- --nocapture 2>&1 | tee -a /tmp/bus-stack-tests.log
+          cargo +1.89.0 test --locked -p vm-device --lib bus_range_overlap -- --nocapture 2>&1 | tee -a /tmp/bus-stack-tests.log
+
+      - name: Re-run deterministic concurrent-insert candidate discriminator
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("vm-device/src/bus.rs")
+          text = path.read_text()
+          old_struct = "\n".join([
+              "#[derive(Default)]",
+              "pub struct Bus {",
+              "    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,",
+              "}",
+          ])
+          new_struct = "\n".join([
+              "#[derive(Default)]",
+              "pub struct Bus {",
+              "    devices: RwLock<BTreeMap<BusRange, Weak<dyn BusDeviceSync>>>,",
+              "    #[cfg(test)]",
+              "    insert_barrier: Mutex<Option<Arc<Barrier>>>,",
+              "}",
+          ])
+          text = text.replace(old_struct, new_struct, 1)
+          old_new = "\n".join([
+              "    pub fn new() -> Bus {",
+              "        Bus {",
+              "            devices: RwLock::new(BTreeMap::new()),",
+              "        }",
+              "    }",
+          ])
+          new_new = "\n".join([
+              "    pub fn new() -> Bus {",
+              "        Bus {",
+              "            devices: RwLock::new(BTreeMap::new()),",
+              "            #[cfg(test)]",
+              "            insert_barrier: Mutex::new(None),",
+              "        }",
+              "    }",
+              "",
+              "    #[cfg(test)]",
+              "    fn set_insert_barrier(&self, barrier: Option<Arc<Barrier>>) {",
+              "        *self.insert_barrier.lock().unwrap() = barrier;",
+              "    }",
+          ])
+          text = text.replace(old_new, new_new, 1)
+          seam = "        let mut devices = self.devices.write().unwrap();\n"
+          wait = "\n".join([
+              "        #[cfg(test)]",
+              "        let insert_barrier = self.insert_barrier.lock().unwrap().clone();",
+              "        #[cfg(test)]",
+              "        if let Some(barrier) = insert_barrier {",
+              "            barrier.wait();",
+              "        }",
+              "",
+              "        let mut devices = self.devices.write().unwrap();",
+              "",
+          ])
+          text = text.replace(seam, wait, 1)
+          text = text.replace("mod unit_tests {\n    use super::*;", "mod unit_tests {\n    use std::thread;\n\n    use super::*;", 1)
+          pos = text.rfind("\n}\n")
+          lines = [
+              "",
+              "    #[test]",
+              "    fn concurrent_overlapping_inserts_allow_only_one_route() {",
+              "        let bus = Arc::new(Bus::new());",
+              "        let first = Arc::new(DummyDevice);",
+              "        let second = Arc::new(DummyDevice);",
+              "        bus.set_insert_barrier(Some(Arc::new(Barrier::new(2))));",
+              "        let first_bus = bus.clone();",
+              "        let first_device = first.clone();",
+              "        let first_thread = thread::spawn(move || first_bus.insert(first_device, 0x1000, 0x1000));",
+              "        let second_bus = bus.clone();",
+              "        let second_device = second.clone();",
+              "        let second_thread = thread::spawn(move || second_bus.insert(second_device, 0x1800, 0x1000));",
+              "        let first_result = first_thread.join().unwrap();",
+              "        let second_result = second_thread.join().unwrap();",
+              "        bus.set_insert_barrier(None);",
+              "        assert_eq!(usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()), 1);",
+              "        assert_eq!(usize::from(matches!(first_result, Err(Error::Overlap))) + usize::from(matches!(second_result, Err(Error::Overlap))), 1);",
+              "    }",
+          ]
+          path.write_text(text[:pos] + "\n".join(lines) + "\n" + text[pos:])
+          PY
+          cargo +nightly fmt --all
+          cargo +1.89.0 test --locked -p vm-device --lib concurrent_overlapping_inserts_allow_only_one_route -- --nocapture 2>&1 | tee /tmp/r678-candidate.log
+          cp /tmp/bus-stack-candidate.rs vm-device/src/bus.rs
+          cargo +nightly fmt --all
+
+      - name: Full combined gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vm-device 2>&1 | tee /tmp/bus-stack-full.log
+          cargo +1.89.0 clippy --locked -p vm-device --all-targets -- -D warnings 2>&1 | tee -a /tmp/bus-stack-full.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/bus-stack-full.log
+          git diff --check
+          cmp /tmp/bus-stack-candidate.rs vm-device/src/bus.rs
+
+      - name: Commit tested candidate to research branch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "Leo"
+          git config user.email "cheerleaderleo@outlook.com"
+          git add vm-device/src/bus.rs
+          git commit -s -m "vm-device: make Bus range updates atomic"
+          git push origin HEAD:research/ch-bus-r677-r678-r679-stack
+          git rev-parse HEAD | tee /tmp/bus-stack-commit.txt
+
+      - name: Record composition receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998"
+            echo "runner_head=$(git rev-parse HEAD)"
+            for f in /tmp/r677-baseline-rc.txt /tmp/r678-baseline-rc.txt /tmp/r679-baseline-rc.txt /tmp/bus-stack.sha256 /tmp/bus-stack-commit.txt; do
+              if [ -f "$f" ]; then cat "$f"; fi
+            done
+            git status --short
+          } > /tmp/bus-stack-receipt.txt
+
+      - name: Upload composition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-bus-r677-r678-r679-stack
+          path: |
+            /tmp/r677-baseline.log
+            /tmp/r677-baseline-rc.txt
+            /tmp/r678-baseline.log
+            /tmp/r678-baseline-rc.txt
+            /tmp/r679-debug-baseline.log
+            /tmp/r679-release-baseline.log
+            /tmp/r679-baseline-rc.txt
+            /tmp/r678-candidate.log
+            /tmp/bus-stack.diff
+            /tmp/bus-stack.sha256
+            /tmp/bus-stack-tests.log
+            /tmp/bus-stack-full.log
+            /tmp/bus-stack-commit.txt
+            /tmp/bus-stack-receipt.txt
+          if-no-files-found: warn
