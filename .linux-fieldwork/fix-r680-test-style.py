@@ -2,22 +2,25 @@ from pathlib import Path
 
 path = Path('pci/src/bus.rs')
 text = path.read_text()
-
 marker = '#[cfg(test)]\nmod unit_tests {\n'
+if marker not in text:
+    raise SystemExit('pci unit-test module marker missing')
+
+unit_pos = text.index(marker)
+prefix = text[:unit_pos]
+unit = text[unit_pos:]
+
 imports = '\n'.join([
-    '    use std::any::Any;',
     '    use std::sync::atomic::{AtomicU64, Ordering};',
     '',
     '    use crate::configuration::{',
-    '        BarReprogrammingParams, COMMAND_REG, COMMAND_REG_MEMORY_SPACE_MASK,',
-    '        PciBarConfiguration, PciBarPrefetchable,',
+    '        COMMAND_REG, COMMAND_REG_MEMORY_SPACE_MASK, PciBarConfiguration,',
+    '        PciBarPrefetchable,',
     '    };',
     '    use crate::device::DeviceRelocationError;',
     '',
 ])
-if marker not in text:
-    raise SystemExit('pci unit-test module marker missing')
-text = text.replace(marker, marker + imports, 1)
+unit = unit.replace(marker, marker + imports, 1)
 
 replacements = {
     'crate::device::DeviceRelocationError': 'DeviceRelocationError',
@@ -31,6 +34,6 @@ replacements = {
     'std::sync::atomic::Ordering::SeqCst': 'Ordering::SeqCst',
 }
 for old, new in replacements.items():
-    text = text.replace(old, new)
+    unit = unit.replace(old, new)
 
-path.write_text(text)
+path.write_text(prefix + unit)
