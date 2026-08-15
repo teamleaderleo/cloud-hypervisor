@@ -87,7 +87,8 @@ pub struct BusRange {
 impl BusRange {
     /// Returns true if there is overlap with the given range.
     pub fn overlaps(&self, base: u64, len: u64) -> bool {
-        self.base < (base + len) && base < self.base + self.len
+        (self.base as u128) < (base as u128 + len as u128)
+            && (base as u128) < (self.base as u128 + self.len as u128)
     }
 }
 
@@ -155,21 +156,15 @@ impl Bus {
             return Err(Error::ZeroSizedRange);
         }
 
-        // Reject all cases where the new device's range overlaps with an existing device.
-        if self
-            .devices
-            .read()
-            .unwrap()
+        let mut devices = self.devices.write().unwrap();
+        if devices
             .iter()
             .any(|(range, _dev)| range.overlaps(base, len))
         {
             return Err(Error::Overlap);
         }
 
-        if self
-            .devices
-            .write()
-            .unwrap()
+        if devices
             .insert(BusRange { base, len }, Arc::downgrade(&device))
             .is_some()
         {
@@ -178,7 +173,6 @@ impl Bus {
 
         Ok(())
     }
-
     /// Removes the device at the given address space range.
     pub fn remove(&self, base: u64, len: u64) -> Result<()> {
         if len == 0 {
@@ -221,20 +215,38 @@ impl Bus {
         new_base: u64,
         new_len: u64,
     ) -> Result<()> {
-        // Retrieve the device corresponding to the range
-        let device = if let Some((_, _, dev)) = self.resolve(old_base) {
-            dev.clone()
-        } else {
-            return Err(Error::MissingAddressRange);
+        if old_len == 0 || new_len == 0 {
+            return Err(Error::ZeroSizedRange);
+        }
+
+        let old_range = BusRange {
+            base: old_base,
+            len: old_len,
         };
+        let new_range = BusRange {
+            base: new_base,
+            len: new_len,
+        };
+        let mut devices = self.devices.write().unwrap();
+        let device = devices
+            .get(&old_range)
+            .cloned()
+            .ok_or(Error::MissingAddressRange)?;
+        if device.upgrade().is_none() {
+            return Err(Error::MissingAddressRange);
+        }
 
-        // Remove the old address range
-        self.remove(old_base, old_len)?;
+        if devices
+            .iter()
+            .any(|(range, _)| *range != old_range && range.overlaps(new_base, new_len))
+        {
+            return Err(Error::Overlap);
+        }
 
-        // Insert the new address range
-        self.insert(device, new_base, new_len)
+        devices.remove(&old_range);
+        debug_assert!(devices.insert(new_range, device).is_none());
+        Ok(())
     }
-
     /// Reads data from the device that owns the range containing `addr` and puts it into `data`.
     ///
     /// Returns true on success, otherwise `data` is untouched.
@@ -371,5 +383,27 @@ mod unit_tests {
         assert!(a.overlaps(0x13ff, 0x100));
         assert!(!a.overlaps(0x1400, 0x100));
         assert!(!a.overlaps(0xf00, 0x100));
+    }
+    #[test]
+    fn update_range_overlap_failure_preserves_old_range() {
+        let bus = Bus::new();
+        let first = Arc::new(DummyDevice);
+        let second = Arc::new(DummyDevice);
+        bus.insert(first.clone(), 0x1000, 0x100).unwrap();
+        bus.insert(second.clone(), 0x2000, 0x100).unwrap();
+        let err = bus.update_range(0x1000, 0x100, 0x2000, 0x100).unwrap_err();
+        assert!(matches!(err, Error::Overlap));
+        bus.read(0x1000, &mut [0]).unwrap();
+        bus.read(0x2000, &mut [0]).unwrap();
+    }
+
+    #[test]
+    fn bus_range_overlap_handles_high_address_endpoints() {
+        let high = BusRange {
+            base: u64::MAX - 0x10,
+            len: 0x20,
+        };
+        assert!(high.overlaps(u64::MAX - 8, 4));
+        assert!(!high.overlaps(0x1000, 0x100));
     }
 }
