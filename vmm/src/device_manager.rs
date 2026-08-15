@@ -736,6 +736,119 @@ impl Console {
     }
 }
 
+struct MmioBarRelocationReservation<'a> {
+    allocator: &'a Mutex<AddressAllocator>,
+    old_base: GuestAddress,
+    len: GuestUsize,
+}
+
+impl<'a> MmioBarRelocationReservation<'a> {
+    fn new(
+        allocator: &'a Mutex<AddressAllocator>,
+        old_base: u64,
+        new_base: u64,
+        len: u64,
+    ) -> io::Result<Self> {
+        let old_base = GuestAddress(old_base);
+        let new_base = GuestAddress(new_base);
+        let len = len as GuestUsize;
+
+        if allocator
+            .lock()
+            .unwrap()
+            .allocate(Some(new_base), len, Some(len))
+            .is_none()
+        {
+            return Err(io::Error::other("Failed allocating new MMIO range"));
+        }
+
+        Ok(Self {
+            allocator,
+            old_base,
+            len,
+        })
+    }
+
+    fn commit(self) {
+        self.allocator.lock().unwrap().free(self.old_base, self.len);
+    }
+}
+#[derive(Clone, Copy)]
+enum IoEventUpdate {
+    Register,
+    Unregister,
+}
+
+fn rollback_ioevent_move<'a, F>(
+    apply: &mut F,
+    added_new: &[(&'a EventFd, u64)],
+    removed_old: &[(&'a EventFd, u64)],
+) -> Option<io::Error>
+where
+    F: FnMut(IoEventUpdate, &'a EventFd, u64) -> io::Result<()>,
+{
+    let mut first_error = None;
+
+    for &(event, addr) in added_new.iter().rev() {
+        if let Err(error) = apply(IoEventUpdate::Unregister, event, addr)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+
+    for &(event, addr) in removed_old {
+        if let Err(error) = apply(IoEventUpdate::Register, event, addr)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+
+    first_error
+}
+
+fn move_ioeventfds<'a, Old, New, F>(
+    old_events: Old,
+    new_events: New,
+    mut apply: F,
+) -> io::Result<()>
+where
+    Old: IntoIterator<Item = (&'a EventFd, u64)>,
+    New: IntoIterator<Item = (&'a EventFd, u64)>,
+    F: FnMut(IoEventUpdate, &'a EventFd, u64) -> io::Result<()>,
+{
+    let old_events: Vec<_> = old_events.into_iter().collect();
+    let new_events: Vec<_> = new_events.into_iter().collect();
+    let mut removed_old = Vec::new();
+
+    for &(event, addr) in &old_events {
+        if let Err(error) = apply(IoEventUpdate::Unregister, event, addr) {
+            if let Some(rollback) = rollback_ioevent_move(&mut apply, &[], &removed_old) {
+                return Err(io::Error::other(format!(
+                    "failed moving ioevents: {error}; rollback failed: {rollback}"
+                )));
+            }
+            return Err(error);
+        }
+        removed_old.push((event, addr));
+    }
+
+    let mut added_new = Vec::new();
+    for &(event, addr) in &new_events {
+        if let Err(error) = apply(IoEventUpdate::Register, event, addr) {
+            if let Some(rollback) = rollback_ioevent_move(&mut apply, &added_new, &removed_old) {
+                return Err(io::Error::other(format!(
+                    "failed moving ioevents: {error}; rollback failed: {rollback}"
+                )));
+            }
+            return Err(error);
+        }
+        added_new.push((event, addr));
+    }
+
+    Ok(())
+}
 pub(crate) struct AddressManager {
     pub(crate) allocator: Arc<Mutex<SystemAllocator>>,
     pub(crate) io_bus: Arc<Bus>,
@@ -755,6 +868,7 @@ impl DeviceRelocation for AddressManager {
         pci_dev: &mut dyn PciDevice,
         region_type: PciBarRegionType,
     ) -> result::Result<(), io::Error> {
+        let mut mmio_relocation_reservation = None;
         match region_type {
             PciBarRegionType::IoRegion => {
                 let mut sys_allocator = self.allocator.lock().unwrap();
@@ -793,38 +907,29 @@ impl DeviceRelocation for AddressManager {
                     &self.pci_mmio64_allocators
                 };
 
-                // Find the specific allocator that this BAR was allocated from and use it for a new one
+                // Reserve the new BAR address while the old address remains owned.
+                // Successful MMIO BAR targets are BAR-size aligned, so an accepted
+                // equal-size target is disjoint from the existing old range.
                 for pci_mmio_allocator_mutex in pci_mmio_allocators {
-                    let mut pci_mmio_allocator = pci_mmio_allocator_mutex.lock().unwrap();
+                    let contains_old = {
+                        let pci_mmio_allocator = pci_mmio_allocator_mutex.lock().unwrap();
+                        old_base >= pci_mmio_allocator.base().0
+                            && old_base <= pci_mmio_allocator.end().0
+                    };
 
-                    if old_base >= pci_mmio_allocator.base().0
-                        && old_base <= pci_mmio_allocator.end().0
-                    {
-                        // Free old_base first so allocate(new_base) sees it
-                        // as available; restore old_base on failure to keep
-                        // the allocator in sync with the MMIO bus.
-                        pci_mmio_allocator.free(GuestAddress(old_base), len as GuestUsize);
-                        if pci_mmio_allocator
-                            .allocate(Some(GuestAddress(new_base)), len as GuestUsize, Some(len))
-                            .is_none()
-                        {
-                            if pci_mmio_allocator
-                                .allocate(
-                                    Some(GuestAddress(old_base)),
-                                    len as GuestUsize,
-                                    Some(len),
-                                )
-                                .is_none()
-                            {
-                                error!(
-                                    "Failed to restore old MMIO range 0x{old_base:x} after rejected move_bar"
-                                );
-                            }
-                            return Err(io::Error::other("failed allocating new MMIO range"));
-                        }
-
+                    if contains_old {
+                        mmio_relocation_reservation = Some(MmioBarRelocationReservation::new(
+                            pci_mmio_allocator_mutex,
+                            old_base,
+                            new_base,
+                            len,
+                        )?);
                         break;
                     }
+                }
+
+                if mmio_relocation_reservation.is_none() {
+                    return Err(io::Error::other("Failed locating MMIO BAR allocator"));
                 }
 
                 // Update MMIO bus
@@ -865,20 +970,26 @@ impl DeviceRelocation for AddressManager {
         if let Some(virtio_pci_dev) = any_dev.downcast_ref::<VirtioPciDevice>() {
             let bar_addr = virtio_pci_dev.config_bar_addr();
             if bar_addr == new_base {
-                for (event, addr) in virtio_pci_dev.ioeventfds(old_base) {
-                    let io_addr = IoEventAddress::Mmio(addr);
-                    self.vm.unregister_ioevent(event, &io_addr).map_err(|e| {
-                        io::Error::other(format!("failed to unregister ioevent: {e:?}"))
-                    })?;
-                }
-                for (event, addr) in virtio_pci_dev.ioeventfds(new_base) {
-                    let io_addr = IoEventAddress::Mmio(addr);
-                    self.vm
-                        .register_ioevent(event, &io_addr, None)
-                        .map_err(|e| {
-                            io::Error::other(format!("failed to register ioevent: {e:?}"))
-                        })?;
-                }
+                move_ioeventfds(
+                    virtio_pci_dev.ioeventfds(old_base),
+                    virtio_pci_dev.ioeventfds(new_base),
+                    |update, event, addr| {
+                        let io_addr = IoEventAddress::Mmio(addr);
+                        match update {
+                            IoEventUpdate::Register => self
+                                .vm
+                                .register_ioevent(event, &io_addr, None)
+                                .map_err(|e| {
+                                    io::Error::other(format!("failed to register ioevent: {e:?}"))
+                                }),
+                            IoEventUpdate::Unregister => {
+                                self.vm.unregister_ioevent(event, &io_addr).map_err(|e| {
+                                    io::Error::other(format!("failed to unregister ioevent: {e:?}"))
+                                })
+                            }
+                        }
+                    },
+                )?;
             } else {
                 let virtio_dev = virtio_pci_dev.virtio_device();
                 let mut virtio_dev = virtio_dev.lock().unwrap();
@@ -929,7 +1040,11 @@ impl DeviceRelocation for AddressManager {
             }
         }
 
-        pci_dev.move_bar(old_base, new_base)
+        pci_dev.move_bar(old_base, new_base)?;
+        if let Some(reservation) = mmio_relocation_reservation {
+            reservation.commit();
+        }
+        Ok(())
     }
 }
 
@@ -6180,6 +6295,8 @@ impl Drop for DeviceManager {
 
 #[cfg(test)]
 mod unit_tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -6270,5 +6387,188 @@ mod unit_tests {
             res[1].lock().unwrap().end(),
             vm_memory::GuestAddress(0x3fffff)
         );
+    }
+    #[test]
+    fn mmio_bar_reservation_success_releases_old_last() {
+        let allocator = Mutex::new(AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap());
+        let old = GuestAddress(0x2000);
+        let new = GuestAddress(0x4000);
+        let len = 0x1000;
+        allocator
+            .lock()
+            .unwrap()
+            .allocate(Some(old), len, Some(len))
+            .unwrap();
+
+        let reservation = MmioBarRelocationReservation::new(&allocator, old.0, new.0, len).unwrap();
+        {
+            let mut allocator = allocator.lock().unwrap();
+            assert_eq!(allocator.allocate(Some(old), len, Some(len)), None);
+            assert_eq!(allocator.allocate(Some(new), len, Some(len)), None);
+        }
+        reservation.commit();
+
+        let mut allocator = allocator.lock().unwrap();
+        assert_eq!(allocator.allocate(Some(old), len, Some(len)), Some(old));
+        assert_eq!(allocator.allocate(Some(new), len, Some(len)), None);
+    }
+
+    #[test]
+    fn mmio_bar_reservation_error_quarantines_old_and_new() {
+        let allocator = Mutex::new(AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap());
+        let old = GuestAddress(0x2000);
+        let new = GuestAddress(0x4000);
+        let len = 0x1000;
+        allocator
+            .lock()
+            .unwrap()
+            .allocate(Some(old), len, Some(len))
+            .unwrap();
+
+        let _reservation =
+            MmioBarRelocationReservation::new(&allocator, old.0, new.0, len).unwrap();
+
+        let mut allocator = allocator.lock().unwrap();
+        assert_eq!(allocator.allocate(Some(old), len, Some(len)), None);
+        assert_eq!(allocator.allocate(Some(new), len, Some(len)), None);
+    }
+
+    #[test]
+    fn mmio_bar_reservation_rejects_partial_overlap_without_releasing_old() {
+        let allocator = Mutex::new(AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap());
+        let old = GuestAddress(0x2000);
+        let overlapping = GuestAddress(0x2800);
+        let len = 0x1000;
+        allocator
+            .lock()
+            .unwrap()
+            .allocate(Some(old), len, Some(len))
+            .unwrap();
+
+        assert!(MmioBarRelocationReservation::new(&allocator, old.0, overlapping.0, len,).is_err());
+
+        let mut allocator = allocator.lock().unwrap();
+        assert_eq!(allocator.allocate(Some(old), len, Some(len)), None);
+        assert_eq!(
+            allocator.allocate(Some(GuestAddress(0x4000)), len, Some(len)),
+            Some(GuestAddress(0x4000))
+        );
+    }
+
+    #[test]
+    fn mmio_bar_reservation_does_not_hold_allocator_mutex() {
+        let allocator = Mutex::new(AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap());
+        let old = GuestAddress(0x2000);
+        let new = GuestAddress(0x4000);
+        let len = 0x1000;
+        allocator
+            .lock()
+            .unwrap()
+            .allocate(Some(old), len, Some(len))
+            .unwrap();
+
+        let _reservation =
+            MmioBarRelocationReservation::new(&allocator, old.0, new.0, len).unwrap();
+        let _guard = allocator.try_lock().unwrap();
+    }
+    fn synthetic_ioevent_state(events: &[(&EventFd, u64)]) -> HashSet<(i32, u64)> {
+        events
+            .iter()
+            .map(|(event, addr)| (event.as_raw_fd(), *addr))
+            .collect()
+    }
+
+    #[test]
+    fn ioevent_move_restores_old_for_every_primary_failure() {
+        let first = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let second = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let old = [(&first, 0x1000), (&second, 0x1100)];
+        let new = [(&first, 0x2000), (&second, 0x2100)];
+        let old_state = synthetic_ioevent_state(&old);
+
+        for fail_at in 0..(old.len() + new.len()) {
+            let mut state = old_state.clone();
+            let mut call = 0usize;
+            let result = move_ioeventfds(
+                old.iter().copied(),
+                new.iter().copied(),
+                |update, event, addr| {
+                    let current = call;
+                    call += 1;
+                    if current == fail_at {
+                        return Err(io::Error::other("injected primary failure"));
+                    }
+
+                    let key = (event.as_raw_fd(), addr);
+                    match update {
+                        IoEventUpdate::Register if state.insert(key) => Ok(()),
+                        IoEventUpdate::Unregister if state.remove(&key) => Ok(()),
+                        _ => Err(io::Error::other("synthetic registry mismatch")),
+                    }
+                },
+            );
+
+            assert!(result.is_err());
+            assert_eq!(state, old_state, "failure at operation {fail_at}");
+        }
+    }
+
+    #[test]
+    fn ioevent_move_success_publishes_only_new() {
+        let first = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let second = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let old = [(&first, 0x1000), (&second, 0x1100)];
+        let new = [(&first, 0x2000), (&second, 0x2100)];
+        let mut state = synthetic_ioevent_state(&old);
+
+        move_ioeventfds(
+            old.iter().copied(),
+            new.iter().copied(),
+            |update, event, addr| {
+                let key = (event.as_raw_fd(), addr);
+                match update {
+                    IoEventUpdate::Register if state.insert(key) => Ok(()),
+                    IoEventUpdate::Unregister if state.remove(&key) => Ok(()),
+                    _ => Err(io::Error::other("synthetic registry mismatch")),
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state, synthetic_ioevent_state(&new));
+    }
+
+    #[test]
+    fn ioevent_move_reports_rollback_failure() {
+        let first = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let second = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let old = [(&first, 0x1000), (&second, 0x1100)];
+        let new = [(&first, 0x2000), (&second, 0x2100)];
+        let old_state = synthetic_ioevent_state(&old);
+        let mut state = old_state.clone();
+        let mut call = 0usize;
+
+        let error = move_ioeventfds(
+            old.iter().copied(),
+            new.iter().copied(),
+            |update, event, addr| {
+                let current = call;
+                call += 1;
+                if current == 2 || current == 3 {
+                    return Err(io::Error::other("injected failure"));
+                }
+
+                let key = (event.as_raw_fd(), addr);
+                match update {
+                    IoEventUpdate::Register if state.insert(key) => Ok(()),
+                    IoEventUpdate::Unregister if state.remove(&key) => Ok(()),
+                    _ => Err(io::Error::other("synthetic registry mismatch")),
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("rollback failed"));
+        assert_ne!(state, old_state);
     }
 }
