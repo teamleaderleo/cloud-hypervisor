@@ -1,0 +1,113 @@
+name: PCI BAR ioevent rollback probe v2
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-ioevent-rollback
+  workflow_dispatch:
+
+jobs:
+  ioevent-rollback:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Reuse exact ioevent materializer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/ch-pci-bar-r599-ioevent-rollback.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if line.strip() == "python3 - <<'PY'") + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          body = workflow[start:end]
+          indent = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+          Path('/tmp/materialize.py').write_text('\n'.join(line[indent:] for line in body) + '\n')
+          PY
+          python3 /tmp/materialize.py
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('vmm/src/device_manager.rs')
+          text = path.read_text()
+          marker = '#[cfg(test)]\nmod unit_tests {\n    use std::io::Write;'
+          replacement = '#[cfg(test)]\nmod unit_tests {\n    use std::collections::HashSet;\n    use std::io::Write;'
+          if marker not in text:
+              raise SystemExit('unit test import shape changed')
+          text = text.replace(marker, replacement, 1)
+          text = text.replace(
+              ') -> std::collections::HashSet<(i32, u64)> {',
+              ') -> HashSet<(i32, u64)> {',
+              1,
+          )
+          path.write_text(text)
+          PY
+
+          cargo +nightly fmt --all
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-ioevent-v2.diff
+          sha256sum /tmp/r599-ioevent-v2.diff | tee /tmp/r599-ioevent-v2.sha256
+
+      - name: Run focused ioevent transaction tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib ioevent_move -- --nocapture 2>&1 | tee /tmp/r599-ioevent-v2.log
+
+      - name: Run device-manager and compile gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r599-ioevent-v2.log
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run 2>&1 | tee -a /tmp/r599-ioevent-v2.log
+
+      - name: Stable Clippy and formatting
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +stable clippy --locked --all --all-targets --no-default-features --tests --examples --features kvm -- -D warnings 2>&1 | tee -a /tmp/r599-ioevent-v2.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-ioevent-v2.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-ioevent-v2.sha256 ]; then cat /tmp/r599-ioevent-v2.sha256; fi
+            git status --short
+          } > /tmp/r599-ioevent-v2-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-ioevent-rollback-v2
+          path: |
+            /tmp/r599-ioevent-v2.diff
+            /tmp/r599-ioevent-v2.sha256
+            /tmp/r599-ioevent-v2.log
+            /tmp/r599-ioevent-v2-receipt.txt
+          if-no-files-found: warn
