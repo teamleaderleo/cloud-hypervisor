@@ -1,0 +1,97 @@
+name: PCI BAR lease guard hosted validation
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-lease-guard
+  workflow_dispatch:
+
+jobs:
+  hosted-validation:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact-current research branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify pristine product source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Reuse exact lease-guard materializer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/ch-pci-bar-r599-lease-guard.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if line.strip() == "python3 - <<'PY'") + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          body = workflow[start:end]
+          indent = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+          Path('/tmp/materialize.py').write_text('\n'.join(line[indent:] for line in body) + '\n')
+          PY
+          python3 /tmp/materialize.py
+          cargo +nightly fmt --all
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-lease-hosted.diff
+          sha256sum /tmp/r599-lease-hosted.diff | tee /tmp/r599-lease-hosted.sha256
+
+      - name: Run device-manager executable tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib \
+            device_manager::unit_tests -- --nocapture 2>&1 | tee /tmp/r599-lease-hosted.log
+
+      - name: Compile complete KVM-flavored vmm test suite
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run \
+            2>&1 | tee -a /tmp/r599-lease-hosted.log
+
+      - name: Quality gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 clippy --locked -p vmm --features kvm --all-targets -- -D warnings \
+            2>&1 | tee -a /tmp/r599-lease-hosted.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-lease-hosted.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo "upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998"
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-lease-hosted.sha256 ]; then cat /tmp/r599-lease-hosted.sha256; fi
+            git status --short
+          } > /tmp/r599-lease-hosted-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-lease-guard-hosted
+          path: |
+            /tmp/r599-lease-hosted.diff
+            /tmp/r599-lease-hosted.sha256
+            /tmp/r599-lease-hosted.log
+            /tmp/r599-lease-hosted-receipt.txt
+          if-no-files-found: warn
