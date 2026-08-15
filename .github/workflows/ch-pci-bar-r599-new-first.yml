@@ -1,0 +1,339 @@
+name: PCI BAR reserve-new-before-release-old probe
+
+on:
+  push:
+    branches:
+      - research/ch-pci-bar-r599-new-first
+  workflow_dispatch:
+
+jobs:
+  new-first:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact current main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -z "$(git diff 69d4c0a82ef15b2660906013bd87ae32668e7998 -- vmm/src/device_manager.rs pci/src/configuration.rs)"
+
+      - name: Install Rust toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Materialize reserve-new-first candidate
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('vmm/src/device_manager.rs')
+          text = path.read_text()
+
+          marker = 'pub(crate) struct AddressManager {'
+          if marker not in text:
+              raise SystemExit('AddressManager marker missing')
+          helper = '\n'.join([
+              "struct MmioBarRelocationReservation<'a> {",
+              "    allocator: &'a Mutex<AddressAllocator>,",
+              "    old_base: GuestAddress,",
+              "    len: GuestUsize,",
+              "}",
+              "",
+              "impl<'a> MmioBarRelocationReservation<'a> {",
+              "    fn new(",
+              "        allocator: &'a Mutex<AddressAllocator>,",
+              "        old_base: u64,",
+              "        new_base: u64,",
+              "        len: u64,",
+              "    ) -> io::Result<Self> {",
+              "        let old_base = GuestAddress(old_base);",
+              "        let new_base = GuestAddress(new_base);",
+              "        let len = len as GuestUsize;",
+              "",
+              "        if allocator",
+              "            .lock()",
+              "            .unwrap()",
+              "            .allocate(Some(new_base), len, Some(len))",
+              "            .is_none()",
+              "        {",
+              "            return Err(io::Error::other(\"Failed allocating new MMIO range\"));",
+              "        }",
+              "",
+              "        Ok(Self {",
+              "            allocator,",
+              "            old_base,",
+              "            len,",
+              "        })",
+              "    }",
+              "",
+              "    fn commit(self) {",
+              "        self.allocator.lock().unwrap().free(self.old_base, self.len);",
+              "    }",
+              "}",
+              "",
+          ])
+          text = text.replace(marker, helper + marker, 1)
+
+          impl_pos = text.index('impl DeviceRelocation for AddressManager')
+          match_pos = text.index('        match region_type {', impl_pos)
+          text = text[:match_pos] + '        let mut mmio_relocation_reservation = None;\n' + text[match_pos:]
+
+          old = '\n'.join([
+              '                // Find the specific allocator that this BAR was allocated from and use it for a new one',
+              '                for pci_mmio_allocator_mutex in pci_mmio_allocators {',
+              '                    let mut pci_mmio_allocator = pci_mmio_allocator_mutex.lock().unwrap();',
+              '',
+              '                    if old_base >= pci_mmio_allocator.base().0',
+              '                        && old_base <= pci_mmio_allocator.end().0',
+              '                    {',
+              '                        // Free old_base first so allocate(new_base) sees it',
+              '                        // as available; restore old_base on failure to keep',
+              '                        // the allocator in sync with the MMIO bus.',
+              '                        pci_mmio_allocator.free(GuestAddress(old_base), len as GuestUsize);',
+              '                        if pci_mmio_allocator',
+              '                            .allocate(Some(GuestAddress(new_base)), len as GuestUsize, Some(len))',
+              '                            .is_none()',
+              '                        {',
+              '                            if pci_mmio_allocator',
+              '                                .allocate(',
+              '                                    Some(GuestAddress(old_base)),',
+              '                                    len as GuestUsize,',
+              '                                    Some(len),',
+              '                                )',
+              '                                .is_none()',
+              '                            {',
+              '                                error!(',
+              '                                    "Failed to restore old MMIO range 0x{old_base:x} after rejected move_bar"',
+              '                                );',
+              '                            }',
+              '                            return Err(io::Error::other("failed allocating new MMIO range"));',
+              '                        }',
+              '',
+              '                        break;',
+              '                    }',
+              '                }',
+          ])
+          new = '\n'.join([
+              '                // Reserve the new BAR address while the old address remains owned.',
+              '                // Successful MMIO BAR targets are BAR-size aligned, so an accepted',
+              '                // equal-size target is disjoint from the existing old range.',
+              '                for pci_mmio_allocator_mutex in pci_mmio_allocators {',
+              '                    let contains_old = {',
+              '                        let pci_mmio_allocator = pci_mmio_allocator_mutex.lock().unwrap();',
+              '                        old_base >= pci_mmio_allocator.base().0',
+              '                            && old_base <= pci_mmio_allocator.end().0',
+              '                    };',
+              '',
+              '                    if contains_old {',
+              '                        mmio_relocation_reservation = Some(',
+              '                            MmioBarRelocationReservation::new(',
+              '                                pci_mmio_allocator_mutex,',
+              '                                old_base,',
+              '                                new_base,',
+              '                                len,',
+              '                            )?,',
+              '                        );',
+              '                        break;',
+              '                    }',
+              '                }',
+              '',
+              '                if mmio_relocation_reservation.is_none() {',
+              '                    return Err(io::Error::other("Failed locating MMIO BAR allocator"));',
+              '                }',
+          ])
+          if old not in text:
+              raise SystemExit('MMIO allocator block changed')
+          text = text.replace(old, new, 1)
+
+          old_tail = '        pci_dev.move_bar(old_base, new_base)\n'
+          new_tail = '\n'.join([
+              '        pci_dev.move_bar(old_base, new_base)?;',
+              '        if let Some(reservation) = mmio_relocation_reservation {',
+              '            reservation.commit();',
+              '        }',
+              '        Ok(())',
+              '',
+          ])
+          if old_tail not in text:
+              raise SystemExit('move_bar tail changed')
+          text = text.replace(old_tail, new_tail, 1)
+
+          unit_pos = text.index('#[cfg(test)]\nmod unit_tests')
+          end = text.rfind('\n}')
+          if end < unit_pos:
+              raise SystemExit('unit test module terminator missing')
+          tests = '\n'.join([
+              '',
+              '    #[test]',
+              '    fn mmio_bar_reservation_success_releases_old_last() {',
+              '        let allocator = Mutex::new(',
+              '            AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap(),',
+              '        );',
+              '        let old = GuestAddress(0x2000);',
+              '        let new = GuestAddress(0x4000);',
+              '        let len = 0x1000;',
+              '        allocator',
+              '            .lock()',
+              '            .unwrap()',
+              '            .allocate(Some(old), len, Some(len))',
+              '            .unwrap();',
+              '',
+              '        let reservation = MmioBarRelocationReservation::new(',
+              '            &allocator, old.0, new.0, len,',
+              '        )',
+              '        .unwrap();',
+              '        {',
+              '            let mut allocator = allocator.lock().unwrap();',
+              '            assert_eq!(allocator.allocate(Some(old), len, Some(len)), None);',
+              '            assert_eq!(allocator.allocate(Some(new), len, Some(len)), None);',
+              '        }',
+              '        reservation.commit();',
+              '',
+              '        let mut allocator = allocator.lock().unwrap();',
+              '        assert_eq!(allocator.allocate(Some(old), len, Some(len)), Some(old));',
+              '        assert_eq!(allocator.allocate(Some(new), len, Some(len)), None);',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn mmio_bar_reservation_error_quarantines_old_and_new() {',
+              '        let allocator = Mutex::new(',
+              '            AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap(),',
+              '        );',
+              '        let old = GuestAddress(0x2000);',
+              '        let new = GuestAddress(0x4000);',
+              '        let len = 0x1000;',
+              '        allocator',
+              '            .lock()',
+              '            .unwrap()',
+              '            .allocate(Some(old), len, Some(len))',
+              '            .unwrap();',
+              '',
+              '        let reservation = MmioBarRelocationReservation::new(',
+              '            &allocator, old.0, new.0, len,',
+              '        )',
+              '        .unwrap();',
+              '        drop(reservation);',
+              '',
+              '        let mut allocator = allocator.lock().unwrap();',
+              '        assert_eq!(allocator.allocate(Some(old), len, Some(len)), None);',
+              '        assert_eq!(allocator.allocate(Some(new), len, Some(len)), None);',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn mmio_bar_reservation_rejects_partial_overlap_without_releasing_old() {',
+              '        let allocator = Mutex::new(',
+              '            AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap(),',
+              '        );',
+              '        let old = GuestAddress(0x2000);',
+              '        let overlapping = GuestAddress(0x2800);',
+              '        let len = 0x1000;',
+              '        allocator',
+              '            .lock()',
+              '            .unwrap()',
+              '            .allocate(Some(old), len, Some(len))',
+              '            .unwrap();',
+              '',
+              '        assert!(',
+              '            MmioBarRelocationReservation::new(',
+              '                &allocator, old.0, overlapping.0, len,',
+              '            )',
+              '            .is_err()',
+              '        );',
+              '',
+              '        let mut allocator = allocator.lock().unwrap();',
+              '        assert_eq!(allocator.allocate(Some(old), len, Some(len)), None);',
+              '        assert_eq!(',
+              '            allocator.allocate(Some(GuestAddress(0x4000)), len, Some(len)),',
+              '            Some(GuestAddress(0x4000))',
+              '        );',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn mmio_bar_reservation_does_not_hold_allocator_mutex() {',
+              '        let allocator = Mutex::new(',
+              '            AddressAllocator::new(GuestAddress(0x1000), 0x8000).unwrap(),',
+              '        );',
+              '        let old = GuestAddress(0x2000);',
+              '        let new = GuestAddress(0x4000);',
+              '        let len = 0x1000;',
+              '        allocator',
+              '            .lock()',
+              '            .unwrap()',
+              '            .allocate(Some(old), len, Some(len))',
+              '            .unwrap();',
+              '',
+              '        let reservation = MmioBarRelocationReservation::new(',
+              '            &allocator, old.0, new.0, len,',
+              '        )',
+              '        .unwrap();',
+              '        assert!(allocator.try_lock().is_ok());',
+              '        drop(reservation);',
+              '    }',
+          ])
+          text = text[:end] + tests + text[end:]
+          path.write_text(text)
+          PY
+
+          cargo +nightly fmt --all
+          git add vmm/src/device_manager.rs
+          git diff --cached --check
+          git diff --cached -- vmm/src/device_manager.rs > /tmp/r599-new-first.diff
+          sha256sum /tmp/r599-new-first.diff | tee /tmp/r599-new-first.sha256
+
+      - name: Run focused reservation tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib \
+            mmio_bar_reservation -- --nocapture 2>&1 | tee /tmp/r599-new-first.log
+
+      - name: Run device-manager controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --lib \
+            device_manager::unit_tests -- --nocapture 2>&1 | tee -a /tmp/r599-new-first.log
+
+      - name: Compile and quality gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo +1.89.0 test --locked -p vmm --features kvm --no-run \
+            2>&1 | tee -a /tmp/r599-new-first.log
+          cargo +1.89.0 clippy --locked -p vmm --features kvm --all-targets -- -D warnings \
+            2>&1 | tee -a /tmp/r599-new-first.log
+          cargo +nightly fmt --all -- --check 2>&1 | tee -a /tmp/r599-new-first.log
+          git diff --cached --check
+
+      - name: Record receipt
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          {
+            echo 'upstream_base=69d4c0a82ef15b2660906013bd87ae32668e7998'
+            echo "runner_head=$(git rev-parse HEAD)"
+            if [ -f /tmp/r599-new-first.sha256 ]; then cat /tmp/r599-new-first.sha256; fi
+            git status --short
+          } > /tmp/r599-new-first-receipt.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-r599-new-first
+          path: |
+            /tmp/r599-new-first.diff
+            /tmp/r599-new-first.sha256
+            /tmp/r599-new-first.log
+            /tmp/r599-new-first-receipt.txt
+          if-no-files-found: warn
