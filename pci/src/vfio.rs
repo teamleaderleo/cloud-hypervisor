@@ -2674,33 +2674,23 @@ where
 #[cfg(test)]
 mod mmio_region_range_tests {
     use std::env::temp_dir;
-    use std::fs::{OpenOptions, remove_file};
     use std::os::fd::AsFd;
-    use std::process::id;
-    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
 
-    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-
     fn sparse_mmio_regions() -> Vec<MmioRegion> {
         let page_size = get_page_size();
-        let serial = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-        let path = temp_dir().join(format!("cloud-hypervisor-vfio-sparse-{}-{serial}", id()));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .unwrap();
-        file.set_len(2 * page_size).unwrap();
+        let file =
+            TempFile::new_with_prefix(temp_dir().join("cloud-hypervisor-vfio-sparse-")).unwrap();
+        file.as_file().set_len(2 * page_size).unwrap();
 
         let mapping_a = Arc::new(
             MmapRegion::mmap(
                 page_size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                file.as_fd(),
+                file.as_file().as_fd(),
                 0,
                 0,
             )
@@ -2710,13 +2700,12 @@ mod mmio_region_range_tests {
             MmapRegion::mmap(
                 page_size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                file.as_fd(),
+                file.as_file().as_fd(),
                 page_size,
                 0,
             )
             .unwrap(),
         );
-        remove_file(path).unwrap();
 
         vec![MmioRegion {
             start: GuestAddress(page_size),
@@ -2744,6 +2733,8 @@ mod mmio_region_range_tests {
         let regions = sparse_mmio_regions();
         let guest_addr = page_size + page_size / 2;
 
+        // The BAR spans 4 pages, but only [P, 2P) and [3P, 4P) are mmap-backed.
+        // [1.5P, 2.5P) fits the BAR but extends beyond the first sparse mapping.
         let pointer = regions
             .find_user_address(guest_addr, page_size / 2)
             .unwrap();
